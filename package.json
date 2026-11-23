@@ -1,0 +1,19 @@
+{
+  "name": "sff-smart-shrimp",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"packages/**/*.test.js\" \"apps/**/*.test.js\"",
+    "migrate": "node apps/api/src/migrate.js",
+    "dev:api": "node --watch apps/api/src/server.js",
+    "dev:ingest": "node --watch apps/ingest/src/index.js",
+    "dev:sim": "node apps/simulator/src/index.js"
+  }
+}

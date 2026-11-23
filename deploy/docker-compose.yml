@@ -1,0 +1,126 @@
+# SFF Smart Shrimp - cloud stack (VPS).
+#   docker compose --env-file .env up -d                 # production
+#   docker compose --env-file .env --profile sim up -d   # + 500-pond simulator (demo / load test)
+
+name: sff-smart-shrimp
+
+services:
+  db:
+    image: timescale/timescaledb:2.17.2-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sff
+      POSTGRES_USER: sff
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      TIMESCALEDB_TELEMETRY: "off"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sff -d sff"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # No published port: only reachable inside the compose network.
+
+  emqx:
+    # 5.8.x is the last Apache-2.0 line; 5.9+ is BSL (free single-node). Check before upgrading.
+    image: emqx/emqx:5.8.6
+    restart: unless-stopped
+    environment:
+      # Single node: keep default node name emqx@127.0.0.1 (set hostname-based names only for a cluster).
+      EMQX_NODE__COOKIE: ${EMQX_NODE_COOKIE:-sff-emqx-cookie-change-me}
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DASHBOARD_PASSWORD:?set EMQX_DASHBOARD_PASSWORD}
+      # Queue for offline persistent sessions (ingest restart / DB maintenance). Default 1000 is
+      # one simulator tick; 500k ~ 8 h of 500 ponds at 1 sample/min (+ state messages).
+      EMQX_MQTT__MAX_MQUEUE_LEN: "500000"
+      EMQX_MQTT__SESSION_EXPIRY_INTERVAL: 24h
+    ports:
+      # Farm gateways connect here. In production expose only 8883 (TLS) - see deploy/emqx/README.md.
+      - "${MQTT_PUBLIC_PORT:-1883}:1883"
+      - "8883:8883"
+      - "127.0.0.1:18083:18083" # dashboard: SSH tunnel only
+    volumes:
+      - emqx-data:/opt/emqx/data
+      - emqx-log:/opt/emqx/log
+    healthcheck:
+      test: ["CMD", "/opt/emqx/bin/emqx", "ctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  api:
+    image: ${IMAGE:-sff-smart-shrimp:local}
+    build: ..
+    restart: unless-stopped
+    command: ["node", "apps/api/src/server.js"]
+    environment: &app-env
+      DATABASE_URL: postgres://sff:${POSTGRES_PASSWORD}@db:5432/sff
+      MQTT_URL: mqtt://emqx:1883
+      MQTT_USERNAME: ${MQTT_SERVICE_USER:-}
+      MQTT_PASSWORD: ${MQTT_SERVICE_PASSWORD:-}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD}
+      SEED_DEMO: ${SEED_DEMO:-false}
+      SEED_FARM_CODE: ${SEED_FARM_CODE:-F1}
+      SEED_ZONES: ${SEED_ZONES:-10}
+      SEED_PONDS_PER_ZONE: ${SEED_PONDS_PER_ZONE:-50}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  ingest:
+    image: ${IMAGE:-sff-smart-shrimp:local}
+    restart: unless-stopped
+    build: ..
+    command: ["node", "apps/ingest/src/index.js"]
+    environment:
+      <<: *app-env
+      MQTT_CLIENT_ID: sff-ingest-1
+    depends_on:
+      api:
+        condition: service_healthy # api runs migrations
+      emqx:
+        condition: service_healthy
+
+  simulator:
+    image: ${IMAGE:-sff-smart-shrimp:local}
+    profiles: ["sim"]
+    restart: unless-stopped
+    build: ..
+    command: ["node", "apps/simulator/src/index.js"]
+    environment:
+      <<: *app-env
+      SIM_INTERVAL_SEC: ${SIM_INTERVAL_SEC:-10}
+      SIM_BACKFILL_HOURS: ${SIM_BACKFILL_HOURS:-48}
+    depends_on:
+      ingest:
+        condition: service_started
+
+  caddy:
+    image: caddy:2.8.4-alpine
+    restart: unless-stopped
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api
+
+volumes:
+  db-data:
+  emqx-data:
+  emqx-log:
+  caddy-data:
+  caddy-config:

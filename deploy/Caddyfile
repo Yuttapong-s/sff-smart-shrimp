@@ -1,0 +1,18 @@
+# SITE_ADDRESS = your domain (e.g. app.example.com) for automatic HTTPS.
+# PWA install and Web Push both require HTTPS. ":80" is for local testing only.
+{$SITE_ADDRESS}
+
+encode zstd gzip
+
+# SSE must not be buffered.
+@stream path /api/stream
+reverse_proxy @stream api:3000 {
+	flush_interval -1
+}
+
+reverse_proxy api:3000
+
+header {
+	Strict-Transport-Security "max-age=31536000"
+	-Server
+}

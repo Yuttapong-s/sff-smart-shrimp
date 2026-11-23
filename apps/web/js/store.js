@@ -8,6 +8,7 @@ import { api, openStream } from './api.js';
 const listeners = new Set();
 
 export const store = {
+  user: null, // {id, role, name}
   farm: null,
   thresholds: DEFAULT_THRESHOLDS,
   openAlarms: 0,
@@ -103,6 +104,8 @@ export async function loadFarm(farmId) {
       Object.assign(store.farm, f);
       emit('farm');
     },
+    // A manual record was saved / deleted somewhere: {type, unitId, pondId}
+    onRecords: (r) => emit('records', r),
   });
 
   clearInterval(staleTimer);

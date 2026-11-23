@@ -64,6 +64,11 @@ jobs:
           curl -sf -b c.txt 'localhost:8080/api/ponds/1/readings?range=24h' | jq -e '(.t | length > 0) and (.doPct | length > 0)'
           curl -sf -b c.txt 'localhost:8080/api/units/1/readings?range=24h' | jq -e '(.t | length > 0) and (.ph | length > 0)'
           curl -sf -b c.txt localhost:8080/api/units/1 | jq -e '.unit.ras.latest.ph != null'
+          # Manual records: stored once, a re-send is a duplicate, invalid input is rejected.
+          REC='{"items":[{"type":"water","clientId":"7d0f6b1e-3a52-4c1e-9f0a-0c8b6f2d4e11","data":{"unitId":1,"time":"'$(date -u +%FT%TZ)'","values":{"alkalinity":150}}},{"type":"feeding","clientId":"7d0f6b1e-3a52-4c1e-9f0a-0c8b6f2d4e12","data":{"pondId":1,"fedAt":"'$(date -u +%FT%TZ)'","feedKg":-1}}]}'
+          curl -sf -b c.txt -H 'Content-Type: application/json' -d "$REC" localhost:8080/api/records | jq -e '[.results[].status] == ["ok","rejected"]'
+          curl -sf -b c.txt -H 'Content-Type: application/json' -d "$REC" localhost:8080/api/records | jq -e '.results[0].status == "duplicate"'
+          curl -sf -b c.txt localhost:8080/api/units/1 | jq -e '.records.water[0].values.alkalinity == 150'
           # A RAS serves at most 10 ponds: the 11th insert must fail.
           ! docker compose --env-file .env exec -T db psql -U sff -d sff -v ON_ERROR_STOP=1 -c "insert into ponds (farm_id, unit_id, code) select 1, 1, 'X' || g from generate_series(1, 7) g"
           test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/api/farms)" = 401

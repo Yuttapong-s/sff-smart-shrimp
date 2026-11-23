@@ -4,6 +4,7 @@ import { login, logout, requireAuth } from './auth.js';
 import { listPonds, getPond, getReadings, getRasReadings, getThresholds } from './ponds.js';
 import { listUnits } from './units.js';
 import { streamHandler } from './stream.js';
+import { records, waterTests, waterLatest, labTests, feedings, growthSamples, cycleHistory } from './records.js';
 
 export const api = Router();
 
@@ -18,6 +19,8 @@ api.post('/auth/logout', logout);
 api.use(requireAuth);
 
 api.get('/me', (req, res) => res.json(req.user));
+
+api.use(records);
 
 api.get('/farms', async (_req, res) => {
   const { rows } = await pool.query(
@@ -63,7 +66,7 @@ api.get('/ponds/:id', async (req, res) => {
   const { row, json } = found;
 
   const cycleId = row.cycle_id;
-  const [devices, alarms, manual, lab, calibrations, growth, thresholds, [unit]] = await Promise.all([
+  const [devices, alarms, calibrations, thresholds, [unit], water, lab, feed, growth, cycles] = await Promise.all([
     pool.query(
       `SELECT d.id, d.code, d.kind, d.name, s.is_on, s.current_a, s.fault, s.updated_at
        FROM devices d LEFT JOIN device_state s ON s.device_id = d.id
@@ -76,29 +79,17 @@ api.get('/ponds/:id', async (req, res) => {
       [pondId],
     ),
     pool.query(
-      `SELECT time, param, value, unit, method, note FROM manual_readings
-       WHERE pond_id = $1 ORDER BY time DESC LIMIT 30`,
-      [pondId],
-    ),
-    pool.query(
-      `SELECT sampled_at, lab_name, param, value, value_text, unit FROM lab_results
-       WHERE pond_id = $1 ORDER BY sampled_at DESC LIMIT 30`,
-      [pondId],
-    ),
-    pool.query(
       `SELECT DISTINCT ON (metric) metric, calibrated_at, next_due, note FROM calibrations
        WHERE pond_id = $1 ORDER BY metric, calibrated_at DESC`,
       [pondId],
     ),
-    cycleId
-      ? pool.query(
-          `SELECT sampled_at, abw_g, survival_pct FROM growth_samples
-           WHERE cycle_id = $1 ORDER BY sampled_at DESC LIMIT 1`,
-          [cycleId],
-        )
-      : { rows: [] },
     getThresholds(row.farm_id),
     listUnits(row.farm_id, [row.unit_id]),
+    waterLatest(row.unit_id),
+    labTests({ unitId: row.unit_id, pondId }),
+    feedings(cycleId),
+    growthSamples(cycleId),
+    cycleHistory(pondId),
   ]);
 
   res.json({
@@ -107,7 +98,7 @@ api.get('/ponds/:id', async (req, res) => {
     thresholds,
     pond: json,
     unit: unit ?? null,
-    growth: growth.rows[0] ?? null,
+    growth: growth[0] ?? null,
     devices: devices.rows.map((d) => ({
       id: d.id,
       code: d.code,
@@ -119,9 +110,8 @@ api.get('/ponds/:id', async (req, res) => {
       updatedAt: d.updated_at,
     })),
     alarms: alarms.rows,
-    manual: manual.rows,
-    lab: lab.rows,
     calibrations: calibrations.rows,
+    records: { water, lab, feedings: feed, growth, cycles },
   });
 });
 
@@ -149,7 +139,7 @@ api.get('/units/:id', async (req, res) => {
     rows: [u],
   } = await pool.query('SELECT farm_id FROM units WHERE id = $1', [unitId]);
   if (!u) return res.status(404).json({ error: 'unit not found' });
-  const [[unit], ponds, thresholds, calibrations] = await Promise.all([
+  const [[unit], ponds, thresholds, calibrations, water, lab] = await Promise.all([
     listUnits(u.farm_id, [unitId]),
     listPonds(u.farm_id, null, unitId),
     getThresholds(u.farm_id),
@@ -158,6 +148,8 @@ api.get('/units/:id', async (req, res) => {
        WHERE unit_id = $1 ORDER BY metric, calibrated_at DESC`,
       [unitId],
     ),
+    waterTests(unitId),
+    labTests({ unitId }),
   ]);
   res.json({
     serverTime: new Date().toISOString(),
@@ -166,6 +158,7 @@ api.get('/units/:id', async (req, res) => {
     unit,
     ponds,
     calibrations: calibrations.rows,
+    records: { water, lab },
   });
 });
 

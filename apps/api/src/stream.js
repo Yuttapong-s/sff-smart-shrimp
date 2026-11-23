@@ -8,7 +8,7 @@ import { pool } from './db.js';
 import { listPonds } from './ponds.js';
 import { listUnits } from './units.js';
 
-const CHANNELS = ['pond_update', 'ras_update', 'farm_update'];
+const CHANNELS = ['pond_update', 'ras_update', 'farm_update', 'record_update'];
 const FLUSH_MS = 1000;
 
 /** farmId -> Set<res> */
@@ -72,6 +72,16 @@ function schedule() {
 }
 
 function onNotify(msg) {
+  // Manual records are rare: relay {farmId, type, unitId, pondId} straight away.
+  if (msg.channel === 'record_update') {
+    try {
+      const r = JSON.parse(msg.payload);
+      broadcast(r.farmId, 'records', r);
+    } catch (err) {
+      console.error('[stream] bad record_update payload', err.message);
+    }
+    return;
+  }
   // payload: "<farmId>:<id>,<id>,..." (pond ids / unit ids)  or  "<farmId>" for farm_update
   const [farmPart, idsPart] = msg.payload.split(':');
   const farmId = Number(farmPart);

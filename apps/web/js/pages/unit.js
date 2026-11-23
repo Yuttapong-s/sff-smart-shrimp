@@ -1,4 +1,5 @@
-// Unit detail (= one RAS): RAS status, pH / ORP / temp cards and charts, its ponds, calibration.
+// Unit detail (= one RAS): RAS status, pH / ORP / temp cards and charts, test-kit water tests,
+// water lab results, its ponds, calibration.
 
 import { RAS_METRICS, METRIC_INFO, STATUS_LABEL } from '/shared/index.js';
 import { api } from '../api.js';
@@ -7,6 +8,8 @@ import { goBack } from '../router.js';
 import { createChart } from '../components/ts-chart.js';
 import { metricCard } from '../components/metric-card.js';
 import { esc, fmtDate, fmtDateTime, fmtTile, timeAgo, STATUS_ICON } from '../format.js';
+import { listOutbox, onOutboxChange } from '../outbox.js';
+import { waterTable, labTable, bindDelete } from '../records-view.js';
 
 const RANGES = [
   { key: '24h', label: '24 ชม.' },
@@ -22,6 +25,7 @@ export function render(root, { params }) {
   let day = null;
   let range = '24h';
   let charts = [];
+  let outbox = [];
 
   root.innerHTML = `<div class="skeleton">กำลังโหลดข้อมูล Unit…</div>`;
 
@@ -69,6 +73,22 @@ export function render(root, { params }) {
         <div class="note small" data-range-note></div>
       </section>
 
+      <section class="card section" aria-label="ค่าน้ำชุดทดสอบ">
+        <div class="section-head">
+          <h2>ค่าน้ำชุดทดสอบ (RAS)</h2>
+          <a class="btn" href="#/manual?type=water&unit=${unitId}">+ บันทึกค่าน้ำ</a>
+        </div>
+        <div data-water></div>
+      </section>
+
+      <section class="card section" aria-label="ผล Lab น้ำ RAS">
+        <div class="section-head">
+          <h2>ผล Lab น้ำ RAS</h2>
+          <a class="btn" href="#/manual?type=lab&unit=${unitId}">+ บันทึกผล Lab</a>
+        </div>
+        <div data-lab></div>
+      </section>
+
       <section class="card section" aria-label="บ่อใน Unit นี้">
         <div class="section-head"><h2>บ่อใน Unit นี้</h2><span class="small muted" data-pond-counts></span></div>
         <div class="grid unit-grid" data-ponds></div>
@@ -99,6 +119,9 @@ export function render(root, { params }) {
     renderCards();
     renderPonds();
     renderCalib();
+    renderRecords();
+    bindDelete(root.querySelector('[data-water]'), reloadRecords);
+    bindDelete(root.querySelector('[data-lab]'), reloadRecords);
     renderRangeNote();
     setChartData(day);
   }
@@ -173,6 +196,24 @@ export function render(root, { params }) {
       `<table class="list"><thead><tr><th>หัววัด</th><th>Calibrate ล่าสุด</th><th>ครบกำหนด</th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
   }
 
+  function renderRecords() {
+    const mine = (types) => outbox.filter((i) => types.includes(i.type) && i.data.unitId === unitId).reverse();
+    root.querySelector('[data-water]').innerHTML = waterTable(detail.records.water, mine(['water']));
+    root.querySelector('[data-lab]').innerHTML = labTable(detail.records.lab, mine(['lab']));
+  }
+
+  function reloadRecords() {
+    api
+      .unit(unitId)
+      .then((d) => {
+        if (destroyed) return;
+        detail = d;
+        renderRecords();
+        renderCalib();
+      })
+      .catch(() => {});
+  }
+
   function setChartData(d) {
     const to = Math.max(d.to ?? 0, d.t.at(-1) ?? 0, serverNow() / 1000);
     const from = d === day ? to - 24 * 3600 : d.from;
@@ -193,6 +234,10 @@ export function render(root, { params }) {
     if (!detail) return;
     if (type === 'ponds') {
       if (ponds().some((p) => ids.includes(p.id))) renderPonds();
+      return;
+    }
+    if (type === 'records') {
+      if (ids.unitId === unitId && (ids.type === 'water' || ids.type === 'lab')) reloadRecords();
       return;
     }
     if (type !== 'units' && type !== 'reset') return;
@@ -217,9 +262,21 @@ export function render(root, { params }) {
   // Keep "updated N minutes ago" honest when the RAS stops reporting.
   const ageTimer = setInterval(() => detail && renderHead(), 30_000);
 
+  const offOutbox = onOutboxChange((items) => {
+    const sent = items.length < outbox.length;
+    outbox = items;
+    if (!detail) return;
+    renderRecords();
+    if (sent) setTimeout(reloadRecords, 300);
+  });
+  listOutbox()
+    .then((items) => (outbox = items))
+    .catch(() => {});
+
   load();
   return () => {
     destroyed = true;
+    offOutbox();
     unsub();
     clearInterval(ageTimer);
     for (const c of charts) c.chart.destroy();

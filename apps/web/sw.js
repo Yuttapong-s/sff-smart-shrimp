@@ -1,8 +1,8 @@
 // Service worker: app shell works offline; API GETs fall back to the last cached response
 // so the overview still shows the latest known state when signal drops at the ponds.
 
-// Bump VERSION when the shell or the API response shape changes (v2: units + RAS).
-const VERSION = 'v2';
+// Bump VERSION when the shell or the API response shape changes (v2: units + RAS, v3: manual records).
+const VERSION = 'v3';
 const SHELL = `sff-shell-${VERSION}`;
 const API = `sff-api-${VERSION}`;
 
@@ -15,6 +15,8 @@ const SHELL_FILES = [
   '/js/store.js',
   '/js/router.js',
   '/js/format.js',
+  '/js/outbox.js',
+  '/js/records-view.js',
   '/js/components/ts-chart.js',
   '/js/components/metric-card.js',
   '/js/pages/overview.js',
@@ -27,6 +29,7 @@ const SHELL_FILES = [
   '/shared/thresholds.js',
   '/shared/topics.js',
   '/shared/ponds.js',
+  '/shared/records.js',
   '/vendor/uplot/uPlot.esm.js',
   '/vendor/uplot/uPlot.min.css',
   '/manifest.webmanifest',

@@ -1,18 +1,31 @@
 // Pond detail: status, crop cycle, DO-probe cards, the unit's RAS values, charts, devices, tabs.
 
-import { POND_VALUES, RAS_METRICS, METRIC_INFO, STATUS_LABEL } from '/shared/index.js';
+import { POND_VALUES, RAS_METRICS, METRIC_INFO, STATUS_LABEL, WATER_PARAMS, waterRefFlag, roleAtLeast } from '/shared/index.js';
 import { api } from '../api.js';
 import { store, subscribe, serverNow } from '../store.js';
 import { goBack } from '../router.js';
 import { createChart } from '../components/ts-chart.js';
 import { metricCard } from '../components/metric-card.js';
 import { esc, fmt, fmtInt, fmtDate, fmtDateTime, timeAgo, STATUS_ICON, statusText } from '../format.js';
+import { listOutbox, onOutboxChange } from '../outbox.js';
+import { feedingTable, growthTable, waterTable, labTable, cycleTable, bindDelete, sizePerKg } from '../records-view.js';
 
 const RANGES = [
   { key: '24h', label: '24 ชม.' },
   { key: '7d', label: '7 วัน' },
   { key: 'cycle', label: 'ทั้งรอบ' },
 ];
+const TABS = [
+  ['feeding', 'ให้อาหาร'],
+  ['growth', 'การเติบโต'],
+  ['water', 'ค่าน้ำ RAS'],
+  ['lab', 'ผล Lab'],
+  ['cycles', 'รอบการเลี้ยง'],
+  ['alarms', 'แจ้งเตือน'],
+  ['calibrations', 'Calibrate'],
+];
+// Tab -> record type for the "+ บันทึก" link (#/manual?type=...).
+const TAB_RECORD = { feeding: 'feeding', growth: 'growth', water: 'water', lab: 'lab', cycles: 'cycle' };
 const MODE_TEXT = { remote: 'Remote (สั่งจากระบบได้)', local: 'Local (สั่งที่ HMI หน้าฟาร์มเท่านั้น)', unknown: 'ไม่ทราบ' };
 
 export function render(root, { params }) {
@@ -22,7 +35,9 @@ export function render(root, { params }) {
   let day = null; // 24h readings for cards + default chart
   let range = '24h';
   let charts = [];
-  let tab = 'alarms';
+  let tab = sessionStorage.getItem('sff-pond-tab') ?? 'feeding';
+  if (!TABS.some(([k]) => k === tab)) tab = 'feeding';
+  let outbox = [];
 
   root.innerHTML = `<div class="skeleton">กำลังโหลดข้อมูลบ่อ…</div>`;
 
@@ -76,19 +91,14 @@ export function render(root, { params }) {
 
       <section class="card section">
         <div class="tabs" role="tablist" data-tabs>
-          ${[
-            ['alarms', 'แจ้งเตือน'],
-            ['manual', 'ค่าน้ำ (ชุดทดสอบ)'],
-            ['lab', 'ผล Lab'],
-            ['calibrations', 'Calibrate'],
-          ]
+          ${TABS
             .map(([k, l]) => `<button type="button" role="tab" data-tab="${k}" aria-selected="${k === tab}">${l}</button>`)
             .join('')}
         </div>
         <div data-tab-body></div>
       </section>
 
-      <a class="fab" href="#/manual?pond=${pondId}">✎ บันทึกค่าน้ำบ่อนี้</a>
+      <a class="fab" href="#/manual?type=feeding&pond=${pondId}">✎ บันทึกบ่อนี้</a>
     `;
 
     root.querySelector('[data-back]').addEventListener('click', () => goBack('#/'));
@@ -104,6 +114,7 @@ export function render(root, { params }) {
       const b = e.target.closest('[data-tab]');
       if (!b) return;
       tab = b.dataset.tab;
+      sessionStorage.setItem('sff-pond-tab', tab);
       for (const x of root.querySelectorAll('[data-tab]')) x.setAttribute('aria-selected', String(x.dataset.tab === tab));
       renderTab();
     });
@@ -119,6 +130,7 @@ export function render(root, { params }) {
     renderRas();
     renderDevices();
     renderTab();
+    bindDelete(root.querySelector('[data-tab-body]'), reloadDetail);
     setChartData(day);
   }
 
@@ -145,8 +157,15 @@ export function render(root, { params }) {
       parts.push(`<span>รอบเลี้ยง <b>#${c.no}</b></span>`);
       parts.push(`<span>DOC <b class="num">${c.doc}</b> วัน</span>`);
       parts.push(`<span>ปล่อย <b class="num">${fmtInt(c.stockedCount)}</b> ตัว (${fmtDate(c.stockedAt)})</span>`);
-      parts.push(g ? `<span>ABW <b class="num">${g.abw_g}</b> g</span>` : `<span class="muted">ยังไม่มีผลสุ่มน้ำหนัก</span>`);
-      if (g?.survival_pct) parts.push(`<span>อัตรารอดประเมิน <b class="num">${g.survival_pct}%</b></span>`);
+      parts.push(
+        g
+          ? `<span>ABW <b class="num">${g.abwG}</b> g (${sizePerKg(g.abwG)} ตัว/กก. · ${fmtDate(g.sampledAt)})</span>`
+          : `<span class="muted">ยังไม่มีผลสุ่มน้ำหนัก</span>`,
+      );
+      if (g?.survivalPct != null) parts.push(`<span>อัตรารอดประเมิน <b class="num">${g.survivalPct}%</b></span>`);
+      const f = detail.records.feedings;
+      const kg = (v, d) => v.toLocaleString('th-TH', { maximumFractionDigits: d });
+      parts.push(`<span>อาหารวันนี้ <b class="num">${kg(f.todayKg, 1)}</b> kg (${f.todayMeals} มื้อ) · รวมทั้งรอบ <b class="num">${kg(f.totalKg, 0)}</b> kg</span>`);
     } else {
       parts.push('<span><b>บ่อว่าง</b> — ไม่มีรอบการเลี้ยง</span>');
     }
@@ -222,33 +241,50 @@ export function render(root, { params }) {
         : 'สถานะมาจากสัญญาณตอบกลับจริงของ PLC · การสั่งงานจากแอปจะเปิดใช้ในเฟสควบคุมอุปกรณ์ (มีการยืนยันและบันทึกทุกคำสั่ง)';
   }
 
+  /** Outbox items that belong in the current tab of this pond (newest first). */
+  function pendingFor(types, match) {
+    return outbox.filter((i) => types.includes(i.type) && match(i.data)).reverse();
+  }
+
   function renderTab() {
     const body = root.querySelector('[data-tab-body]');
+    const unitId = detail.unit?.id;
+    const p = pondJson();
+    const rec = detail.records;
+    const allowed = tab !== 'cycles' || roleAtLeast(store.user?.role, 'manager');
+    const add = TAB_RECORD[tab] && allowed
+      ? `<div class="tab-actions"><a class="btn" href="#/manual?type=${TAB_RECORD[tab]}&pond=${pondId}">+ บันทึก${tab === 'cycles' ? 'รอบการเลี้ยง' : ''}</a></div>`
+      : '';
     const table = (head, rows) =>
       rows.length
         ? `<table class="list"><thead><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`
         : '<div class="empty">ยังไม่มีข้อมูล</div>';
+    const ofPond = (d) => d.pondId === pondId;
 
-    if (tab === 'alarms') {
+    if (tab === 'feeding') {
+      body.innerHTML =
+        add +
+        (p.cycle || rec.feedings.list.length
+          ? feedingTable(rec.feedings, pendingFor(['feeding'], ofPond))
+          : '<div class="empty">บ่อว่าง — ไม่มีรอบการเลี้ยง</div>');
+    } else if (tab === 'growth') {
+      body.innerHTML = add + growthTable(rec.growth, pendingFor(['growth'], ofPond));
+    } else if (tab === 'water') {
+      body.innerHTML =
+        add +
+        `<div class="note small">วัดที่ระบบ RAS ของ Unit ${esc(p.unit)} ซึ่งใช้น้ำร่วมกันทุกบ่อ · <a href="#/unit/${unitId}">ดูประวัติทั้งหมดที่หน้า Unit</a></div>` +
+        waterLatestBlock(rec.water) +
+        (pendingFor(['water'], (d) => d.unitId === unitId).length ? waterTable([], pendingFor(['water'], (d) => d.unitId === unitId)) : '');
+    } else if (tab === 'lab') {
+      body.innerHTML = add + labTable(rec.lab, pendingFor(['lab'], (d) => d.pondId === pondId || d.unitId === unitId));
+    } else if (tab === 'cycles') {
+      body.innerHTML = add + cycleTable(rec.cycles, pendingFor(['cycle_start', 'cycle_end'], ofPond));
+    } else if (tab === 'alarms') {
       body.innerHTML = table(
         ['เวลา', 'ระดับ', 'รายละเอียด', 'สถานะ'],
         detail.alarms.map(
           (a) => `<tr><td>${fmtDateTime(a.started_at)}</td><td><span class="status-pill s-${a.severity}">${STATUS_ICON[a.severity]} ${STATUS_LABEL[a.severity]}</span></td>
           <td>${esc(a.message)}</td><td>${a.cleared_at ? 'หายแล้ว' : a.acked_at ? 'รับทราบแล้ว' : 'ยังเปิดอยู่'}</td></tr>`,
-        ),
-      );
-    } else if (tab === 'manual') {
-      body.innerHTML = table(
-        ['เวลา', 'ค่า', 'ผล', 'วิธี'],
-        detail.manual.map(
-          (r) => `<tr><td>${fmtDateTime(r.time)}</td><td>${esc(r.param)}</td><td class="num">${r.value} ${esc(r.unit ?? '')}</td><td>${esc(r.method)}</td></tr>`,
-        ),
-      );
-    } else if (tab === 'lab') {
-      body.innerHTML = table(
-        ['วันที่เก็บ', 'Lab', 'รายการ', 'ผล'],
-        detail.lab.map(
-          (r) => `<tr><td>${fmtDateTime(r.sampled_at)}</td><td>${esc(r.lab_name ?? '–')}</td><td>${esc(r.param)}</td><td class="num">${esc(r.value_text ?? r.value)} ${esc(r.unit ?? '')}</td></tr>`,
         ),
       );
     } else {
@@ -262,6 +298,37 @@ export function render(root, { params }) {
         }),
       );
     }
+  }
+
+  /** Latest value of each test-kit param measured on the unit's RAS. */
+  function waterLatestBlock(latest) {
+    const keys = Object.keys(WATER_PARAMS).filter((k) => latest[k]);
+    if (!keys.length) return '<div class="empty">ยังไม่มีผลวัดค่าน้ำของ RAS นี้</div>';
+    return `<div class="latest-grid">${keys
+      .map((k) => {
+        const prm = WATER_PARAMS[k];
+        const v = latest[k];
+        const f = waterRefFlag(k, v.value);
+        return `<div class="latest${f ? ' flag' : ''}">
+          <div class="small">${esc(prm.label)}</div>
+          <div><b class="num">${v.value.toLocaleString('th-TH', { maximumFractionDigits: prm.digits })}</b> <span class="small">${esc(prm.unit)}</span>${f ? ` <span class="flag-text">${f === 'low' ? '↓ ต่ำ' : '↑ สูง'}</span>` : ''}</div>
+          <div class="small muted">${esc(timeAgo(v.time, serverNow()))}</div>
+        </div>`;
+      })
+      .join('')}</div>`;
+  }
+
+  function reloadDetail() {
+    api
+      .pond(pondId)
+      .then((d) => {
+        if (destroyed) return;
+        detail = d;
+        renderHead();
+        renderDevices();
+        renderTab();
+      })
+      .catch(() => {});
   }
 
   function setChartData(d) {
@@ -286,6 +353,11 @@ export function render(root, { params }) {
     if (!detail) return;
     if (type === 'units') {
       if (detail.unit && ids.includes(detail.unit.id)) renderRas();
+      return;
+    }
+    if (type === 'records') {
+      const r = ids; // {type, unitId, pondId}
+      if (r.pondId === pondId || (r.unitId === detail.unit?.id && (r.type === 'water' || r.type === 'lab'))) reloadDetail();
       return;
     }
     if (type !== 'ponds' && type !== 'reset') return;
@@ -314,15 +386,28 @@ export function render(root, { params }) {
           if (destroyed) return;
           detail = d;
           renderDevices();
+          renderHead();
           if (tab !== 'calibrations') renderTab();
         })
         .catch(() => {});
     }
   });
 
+  const offOutbox = onOutboxChange((items) => {
+    const sent = items.length < outbox.length;
+    outbox = items;
+    if (!detail) return;
+    renderTab();
+    if (sent) setTimeout(reloadDetail, 300);
+  });
+  listOutbox()
+    .then((items) => (outbox = items))
+    .catch(() => {});
+
   load();
   return () => {
     destroyed = true;
+    offOutbox();
     unsub();
     for (const c of charts) c.chart.destroy();
     document.title = 'SFF Smart Shrimp';

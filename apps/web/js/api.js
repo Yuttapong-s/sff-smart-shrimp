@@ -33,12 +33,13 @@ export const api = {
   readings: (id, range) => request(`/ponds/${id}/readings?range=${encodeURIComponent(range)}`),
   unit: (id) => request(`/units/${id}`),
   unitReadings: (id, range) => request(`/units/${id}/readings?range=${encodeURIComponent(range)}`),
+  deleteRecord: (type, clientId) => request(`/records/${type}/${clientId}`, { method: 'DELETE' }),
 };
 
 /**
  * Open the farm event stream. EventSource reconnects by itself; we surface state changes.
  * @param {number} farmId
- * @param {{onPonds: Function, onUnits: Function, onFarm: Function, onHello: Function, onState: Function}} h
+ * @param {{onPonds: Function, onUnits: Function, onFarm: Function, onRecords: Function, onHello: Function, onState: Function}} h
  */
 export function openStream(farmId, h) {
   const es = new EventSource(`/api/stream?farm=${farmId}`);
@@ -50,6 +51,7 @@ export function openStream(farmId, h) {
   es.addEventListener('ponds', (e) => h.onPonds?.(JSON.parse(e.data)));
   es.addEventListener('units', (e) => h.onUnits?.(JSON.parse(e.data)));
   es.addEventListener('farm', (e) => h.onFarm?.(JSON.parse(e.data)));
+  es.addEventListener('records', (e) => h.onRecords?.(JSON.parse(e.data)));
   es.onerror = () => h.onState?.(es.readyState === EventSource.CLOSED ? 'offline' : 'connecting');
   return () => es.close();
 }

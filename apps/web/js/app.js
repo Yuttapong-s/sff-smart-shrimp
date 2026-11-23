@@ -3,9 +3,10 @@
 //   #/pond/:id      pond detail
 //   #/unit/:id      unit (RAS) detail
 //   #/alarms        alarm list
-//   #/manual        manual water-test entry
+//   #/manual        manual records (water test, feeding, growth, lab, crop cycle) + outbox
 
-import { api } from './api.js';
+import { api, HttpError } from './api.js';
+import { setOutboxUser, onOutboxChange, listOutbox } from './outbox.js';
 import { store, subscribe, loadFarm, stopFarm } from './store.js';
 import { timeAgo } from './format.js';
 import { parseHash, saveScroll } from './router.js';
@@ -67,6 +68,17 @@ const connEl = document.getElementById('conn');
 const banner = document.getElementById('banner');
 const CONN_TEXT = { live: 'สด', connecting: 'กำลังเชื่อมต่อ', offline: 'ออฟไลน์' };
 
+// Outbox badge: records saved on this phone that the server has not confirmed yet.
+const outboxEl = document.getElementById('outbox-badge');
+onOutboxChange((items, { syncing }) => {
+  const rejected = items.filter((i) => i.state === 'rejected').length;
+  const pending = items.length - rejected;
+  outboxEl.hidden = !items.length || !user;
+  outboxEl.dataset.level = rejected ? 'crit' : 'warn';
+  outboxEl.textContent = rejected ? `✕ ส่งไม่สำเร็จ ${rejected}` : `${syncing ? '↻' : '⏳'} รอส่ง ${pending}`;
+  outboxEl.title = rejected ? 'มีรายการที่เซิร์ฟเวอร์ไม่รับ — แตะเพื่อดู' : 'บันทึกไว้ในเครื่องแล้ว จะส่งอัตโนมัติเมื่อมีสัญญาณ';
+});
+
 function renderHeader() {
   const online = navigator.onLine;
   const state = online ? store.conn : 'offline';
@@ -125,10 +137,35 @@ document.getElementById('theme-toggle').addEventListener('click', () => {
 
 // ---------- auth ----------
 
+const USER_KEY = 'sff-user';
+const cacheUser = (u) => {
+  try {
+    if (u) localStorage.setItem(USER_KEY, JSON.stringify(u));
+    else localStorage.removeItem(USER_KEY);
+  } catch {}
+};
+
+function setUser(u) {
+  user = u;
+  store.user = u;
+  cacheUser(u);
+  setOutboxUser(u);
+}
+
 document.getElementById('logout').addEventListener('click', async () => {
+  const waiting = (await listOutbox().catch(() => [])).filter((i) => i.userId === user?.id && i.state === 'pending').length;
+  if (
+    waiting &&
+    !confirm(`มีรายการรอส่ง ${waiting} รายการ
+ออกจากระบบแล้วรายการจะยังอยู่ในเครื่อง และจะส่งเมื่อคุณเข้าสู่ระบบอีกครั้ง
+
+ออกจากระบบต่อไหม?`)
+  ) {
+    return;
+  }
   await api.logout().catch(() => {});
   stopFarm();
-  user = null;
+  setUser(null);
   if ('caches' in window) {
     caches
       .keys()
@@ -141,20 +178,32 @@ document.getElementById('logout').addEventListener('click', async () => {
 
 window.addEventListener('auth-required', () => {
   if (!user) return;
-  user = null;
+  setUser(null);
   stopFarm();
   route();
 });
 
 async function start() {
+  let u = null;
   try {
-    user = await api.me();
-  } catch {
-    user = null;
+    u = await api.me();
+  } catch (err) {
+    // No signal at the ponds: keep working as the last user (the session cookie is still
+    // checked by the server when the outbox syncs).
+    if (!(err instanceof HttpError)) {
+      try {
+        u = JSON.parse(localStorage.getItem(USER_KEY));
+      } catch {}
+    }
   }
+  setUser(u);
   if (user) {
-    const farms = await api.farms();
-    if (farms.length) await loadFarm(farms[0].id);
+    try {
+      const farms = await api.farms();
+      if (farms.length) await loadFarm(farms[0].id);
+    } catch (err) {
+      console.warn('farm load failed', err);
+    }
   }
   renderHeader();
   currentPath = null;

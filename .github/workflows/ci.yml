@@ -9,8 +9,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -25,7 +25,7 @@ jobs:
       run:
         working-directory: deploy
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Write CI env
         run: |
           cat > .env <<EOF
@@ -60,7 +60,7 @@ jobs:
         run: |
           curl -sf localhost:8080/api/health
           curl -sf -c c.txt -H 'Content-Type: application/json' -d '{"username":"admin","password":"ci-admin-pass"}' localhost:8080/api/auth/login
-          curl -sf -b c.txt localhost:8080/api/farms/1/overview | jq -e '(.units | length == 2) and (.ponds | length == ([.units[].pondCount] | add)) and all(.units[]; .pondCount >= 4 and .pondCount <= 6)'
+          curl -sf -b c.txt localhost:8080/api/farms/1/overview | jq -e '(.units | length == 2) and ((.ponds | length) == ([.units[].pondCount] | add)) and all(.units[]; .pondCount >= 4 and .pondCount <= 6)'
           curl -sf -b c.txt 'localhost:8080/api/ponds/1/readings?range=24h' | jq -e '(.t | length > 0) and (.doPct | length > 0)'
           curl -sf -b c.txt 'localhost:8080/api/units/1/readings?range=24h' | jq -e '(.t | length > 0) and (.ph | length > 0)'
           curl -sf -b c.txt localhost:8080/api/units/1 | jq -e '.unit.ras.latest.ph != null'

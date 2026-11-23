@@ -38,8 +38,9 @@ jobs:
           ADMIN_PASSWORD=ci-admin-pass
           EMQX_DASHBOARD_PASSWORD=ci-dashboard
           SEED_DEMO=true
-          SEED_ZONES=2
-          SEED_PONDS_PER_ZONE=10
+          SEED_UNITS=2
+          SEED_PONDS_MIN=4
+          SEED_PONDS_MAX=6
           SIM_INTERVAL_SEC=2
           SIM_BACKFILL_HOURS=1
           EOF
@@ -48,9 +49,10 @@ jobs:
       - name: Wait for live data
         run: |
           for i in $(seq 1 60); do
-            n=$(docker compose --env-file .env exec -T db psql -U sff -d sff -Atc "select count(*) from pond_latest where time > now() - interval '30 seconds'")
-            echo "live ponds: $n"
-            [ "$n" -ge 15 ] && exit 0
+            n=$(docker compose --env-file .env exec -T db psql -U sff -d sff -Atc "select (select count(*) from pond_latest where time > now() - interval '30 seconds') || ' ' || (select count(*) from ras_latest where time > now() - interval '30 seconds')")
+            echo "live ponds / RAS: $n"
+            set -- $n
+            [ "$1" -ge 8 ] && [ "$2" -ge 2 ] && exit 0
             sleep 2
           done
           exit 1
@@ -58,8 +60,12 @@ jobs:
         run: |
           curl -sf localhost:8080/api/health
           curl -sf -c c.txt -H 'Content-Type: application/json' -d '{"username":"admin","password":"ci-admin-pass"}' localhost:8080/api/auth/login
-          curl -sf -b c.txt localhost:8080/api/farms/1/overview | jq -e '.ponds | length == 20'
-          curl -sf -b c.txt 'localhost:8080/api/ponds/1/readings?range=24h' | jq -e '.t | length > 0'
+          curl -sf -b c.txt localhost:8080/api/farms/1/overview | jq -e '(.units | length == 2) and (.ponds | length == ([.units[].pondCount] | add)) and all(.units[]; .pondCount >= 4 and .pondCount <= 6)'
+          curl -sf -b c.txt 'localhost:8080/api/ponds/1/readings?range=24h' | jq -e '(.t | length > 0) and (.doPct | length > 0)'
+          curl -sf -b c.txt 'localhost:8080/api/units/1/readings?range=24h' | jq -e '(.t | length > 0) and (.ph | length > 0)'
+          curl -sf -b c.txt localhost:8080/api/units/1 | jq -e '.unit.ras.latest.ph != null'
+          # A RAS serves at most 10 ponds: the 11th insert must fail.
+          ! docker compose --env-file .env exec -T db psql -U sff -d sff -v ON_ERROR_STOP=1 -c "insert into ponds (farm_id, unit_id, code) select 1, 1, 'X' || g from generate_series(1, 7) g"
           test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/api/farms)" = 401
       - if: failure()
         run: docker compose --env-file .env --profile sim logs --tail 100

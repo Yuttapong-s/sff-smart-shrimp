@@ -16,7 +16,7 @@ Access Control → Authorization → File / Built-in Database, then set "no matc
 
 | User | Allow | Topics |
 |---|---|---|
-| `gw-F1` | publish | `sff/F1/+/telemetry`, `sff/F1/+/state`, `sff/F1/+/cmd/ack`, `sff/F1/gateway/status`, `sff/F1/alarm` |
+| `gw-F1` | publish | `sff/F1/+/telemetry`, `sff/F1/+/ras/telemetry`, `sff/F1/+/state`, `sff/F1/+/cmd/ack`, `sff/F1/gateway/status`, `sff/F1/alarm` |
 | `gw-F1` | subscribe | `sff/F1/+/cmd` |
 | service user | subscribe | `sff/#` |
 | service user | publish | `sff/+/+/cmd` |

@@ -1,6 +1,7 @@
 // App shell: auth gate, hash router, theme, connection indicator, service worker.
 //   #/              farm overview
 //   #/pond/:id      pond detail
+//   #/unit/:id      unit (RAS) detail
 //   #/alarms        alarm list
 //   #/manual        manual water-test entry
 
@@ -10,6 +11,7 @@ import { timeAgo } from './format.js';
 import { parseHash, saveScroll } from './router.js';
 import * as overview from './pages/overview.js';
 import * as pond from './pages/pond.js';
+import * as unit from './pages/unit.js';
 import * as alarms from './pages/alarms.js';
 import * as manual from './pages/manual.js';
 import * as login from './pages/login.js';
@@ -18,6 +20,7 @@ const view = document.getElementById('view');
 const routes = [
   { re: /^\/$/, page: overview, nav: 'overview' },
   { re: /^\/pond\/(\d+)$/, page: pond, nav: 'overview' },
+  { re: /^\/unit\/(\d+)$/, page: unit, nav: 'overview' },
   { re: /^\/alarms$/, page: alarms, nav: 'alarms' },
   { re: /^\/manual$/, page: manual, nav: 'manual' },
 ];
@@ -126,7 +129,12 @@ document.getElementById('logout').addEventListener('click', async () => {
   await api.logout().catch(() => {});
   stopFarm();
   user = null;
-  if ('caches' in window) caches.delete('sff-api').catch(() => {});
+  if ('caches' in window) {
+    caches
+      .keys()
+      .then((keys) => Promise.all(keys.filter((k) => k.startsWith('sff-api')).map((k) => caches.delete(k))))
+      .catch(() => {});
+  }
   location.hash = '#/';
   route();
 });

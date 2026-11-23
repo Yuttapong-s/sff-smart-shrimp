@@ -1,17 +1,18 @@
 // Ingest: MQTT -> TimescaleDB.
 // Telemetry is batched (flush every FLUSH_MS or BATCH_MAX rows) and written with one
-// INSERT ... unnest() per batch, then pond_latest is upserted and the api is NOTIFYed.
+// INSERT ... unnest() per batch, then the *_latest table is upserted and the api is NOTIFYed.
+// Two sinks share that path: pond DO probes (sensor_readings) and unit RAS probes (ras_readings).
 
 import mqtt from 'mqtt';
 import pg from 'pg';
 import { INGEST_SUBSCRIPTIONS, parseTopic } from '@sff/shared';
-import { parseTelemetry, parseState, parseGateway } from './parse.js';
+import { parseTelemetry, parseRasTelemetry, parseState, parseGateway } from './parse.js';
 
 const env = process.env;
 const MQTT_URL = env.MQTT_URL ?? 'mqtt://localhost:1883';
 const FLUSH_MS = Number(env.FLUSH_MS ?? 1000);
 const BATCH_MAX = Number(env.BATCH_MAX ?? 5000);
-const BUFFER_MAX = Number(env.BUFFER_MAX ?? 500_000); // rows held in memory while DB is down
+const BUFFER_MAX = Number(env.BUFFER_MAX ?? 500_000); // rows per sink held in memory while DB is down
 // Optional: run several ingest replicas with a shared subscription. Off by default because
 // EMQX does not queue shared-subscription messages while every group member is offline,
 // whereas a single persistent session keeps everything during an ingest restart.
@@ -23,79 +24,118 @@ pool.on('error', (err) => console.error('[db] idle client error', err.message));
 
 // ---------- pond / device lookup cache ----------
 
-let pondByKey = new Map(); // "F1/A01" -> {pondId, farmId}
-let deviceByKey = new Map(); // "<pondId>/AE1" -> deviceId
+let pondByKey = new Map(); // "F1/U01-P01" -> {id, farmId}
+let deviceByKey = new Map(); // "<pond id>/AE1" -> deviceId
+let unitByKey = new Map(); // "F1/U01" -> {id, farmId}
 let farmByCode = new Map(); // "F1" -> farmId
 let lastReload = 0;
 
 async function reloadCache() {
-  const [ponds, devices] = await Promise.all([
+  const [farms, ponds, units, devices] = await Promise.all([
+    pool.query('SELECT id, code FROM farms'),
     pool.query('SELECT p.id, p.code, f.id AS farm_id, f.code AS farm FROM ponds p JOIN farms f ON f.id = p.farm_id'),
+    pool.query('SELECT u.id, u.code, f.id AS farm_id, f.code AS farm FROM units u JOIN farms f ON f.id = u.farm_id'),
     pool.query('SELECT id, pond_id, code FROM devices'),
   ]);
-  pondByKey = new Map(ponds.rows.map((r) => [`${r.farm}/${r.code}`, { pondId: r.id, farmId: r.farm_id }]));
-  farmByCode = new Map(ponds.rows.map((r) => [r.farm, r.farm_id]));
+  farmByCode = new Map(farms.rows.map((r) => [r.code, r.id]));
+  pondByKey = new Map(ponds.rows.map((r) => [`${r.farm}/${r.code}`, { id: r.id, farmId: r.farm_id }]));
+  unitByKey = new Map(units.rows.map((r) => [`${r.farm}/${r.code}`, { id: r.id, farmId: r.farm_id }]));
   deviceByKey = new Map(devices.rows.map((r) => [`${r.pond_id}/${r.code}`, r.id]));
   lastReload = Date.now();
 }
 
-/** Look up a pond; on a miss reload at most every 30 s (new ponds added via the app). */
-async function lookupPond(farm, pond) {
-  const key = `${farm}/${pond}`;
-  let hit = pondByKey.get(key);
+/** Look up a pond/unit; on a miss reload at most every 30 s (new ponds added via the app). */
+async function lookup(getMap, farm, code) {
+  const key = `${farm}/${code}`;
+  let hit = getMap().get(key);
   if (!hit && Date.now() - lastReload > 30_000) {
     await reloadCache();
-    hit = pondByKey.get(key);
+    hit = getMap().get(key);
   }
   return hit;
 }
 
 // ---------- telemetry batching ----------
 
-let buffer = [];
-let flushing = false;
-const stats = { received: 0, written: 0, dropped: 0, unknownPond: 0 };
+const stats = { received: 0, written: 0, dropped: 0, unknown: 0 };
 
-async function flush() {
-  if (flushing || buffer.length === 0) return;
-  flushing = true;
-  const batch = buffer.slice(0, BATCH_MAX);
+/**
+ * A sink = one hypertable + its latest-value table + NOTIFY channel.
+ * `fields` map sample keys to columns (order matters for the unnest types).
+ */
+function makeSink({ name, table, latest, key, fields, channel }) {
+  const cols = fields.map((f) => f.column);
+  const types = ['timestamptz[]', 'int[]', ...fields.map(() => 'real[]'), 'smallint[]'];
+  const unnest = `unnest(${types.map((t, i) => `$${i + 1}::${t}`).join(', ')})`;
+  const all = ['time', key, ...cols, 'quality'];
+  return {
+    name,
+    channel,
+    buffer: [],
+    flushing: false,
+    owner: new Map(), // entity id -> farmId, for NOTIFY payloads
+    insertSql: `INSERT INTO ${table} (${all.join(', ')})
+      SELECT * FROM ${unnest}
+      ON CONFLICT (${key}, time) DO NOTHING`,
+    // Only move the latest row forward in time (backfilled samples never overwrite newer data).
+    latestSql: `INSERT INTO ${latest} (${key}, time, ${cols.join(', ')}, quality, updated_at)
+      SELECT DISTINCT ON (${key}) ${key}, time, ${cols.join(', ')}, quality, now()
+      FROM ${unnest} AS t(${all.join(', ')})
+      ORDER BY ${key}, time DESC
+      ON CONFLICT (${key}) DO UPDATE SET
+        time = EXCLUDED.time, ${cols.map((c) => `${c} = EXCLUDED.${c}`).join(', ')},
+        quality = EXCLUDED.quality, updated_at = now()
+      WHERE ${latest}.time < EXCLUDED.time
+      RETURNING ${key} AS id`,
+    params(batch) {
+      return [
+        batch.map((r) => r.time),
+        batch.map((r) => r.id),
+        ...fields.map((f) => batch.map((r) => r[f.key])),
+        batch.map((r) => r.quality),
+      ];
+    },
+  };
+}
+
+const pondSink = makeSink({
+  name: 'pond',
+  table: 'sensor_readings',
+  latest: 'pond_latest',
+  key: 'pond_id',
+  channel: 'pond_update',
+  fields: [
+    { key: 'do', column: 'do_mgl' },
+    { key: 'doPct', column: 'do_pct' },
+    { key: 'temp', column: 'temp_c' },
+  ],
+});
+const rasSink = makeSink({
+  name: 'ras',
+  table: 'ras_readings',
+  latest: 'ras_latest',
+  key: 'unit_id',
+  channel: 'ras_update',
+  fields: [
+    { key: 'ph', column: 'ph' },
+    { key: 'orp', column: 'orp_mv' },
+    { key: 'temp', column: 'temp_c' },
+  ],
+});
+const SINKS = [pondSink, rasSink];
+
+async function flush(sink) {
+  if (sink.flushing || sink.buffer.length === 0) return;
+  sink.flushing = true;
+  const batch = sink.buffer.slice(0, BATCH_MAX);
   try {
-    const cols = { time: [], pond: [], do: [], ph: [], orp: [], temp: [], q: [] };
-    for (const r of batch) {
-      cols.time.push(r.time);
-      cols.pond.push(r.pondId);
-      cols.do.push(r.do);
-      cols.ph.push(r.ph);
-      cols.orp.push(r.orp);
-      cols.temp.push(r.temp);
-      cols.q.push(r.quality);
-    }
-    const params = [cols.time, cols.pond, cols.do, cols.ph, cols.orp, cols.temp, cols.q];
+    const params = sink.params(batch);
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      const ins = await client.query(
-        `INSERT INTO sensor_readings (time, pond_id, do_mgl, ph, orp_mv, temp_c, quality)
-         SELECT * FROM unnest($1::timestamptz[], $2::int[], $3::real[], $4::real[], $5::real[], $6::real[], $7::smallint[])
-         ON CONFLICT (pond_id, time) DO NOTHING`,
-        params,
-      );
-      // Only move pond_latest forward in time (backfilled samples never overwrite newer data).
-      const { rows: changed } = await client.query(
-        `INSERT INTO pond_latest (pond_id, time, do_mgl, ph, orp_mv, temp_c, quality, updated_at)
-         SELECT DISTINCT ON (pond_id) pond_id, time, do_mgl, ph, orp_mv, temp_c, quality, now()
-         FROM unnest($1::timestamptz[], $2::int[], $3::real[], $4::real[], $5::real[], $6::real[], $7::smallint[])
-              AS t(time, pond_id, do_mgl, ph, orp_mv, temp_c, quality)
-         ORDER BY pond_id, time DESC
-         ON CONFLICT (pond_id) DO UPDATE SET
-           time = EXCLUDED.time, do_mgl = EXCLUDED.do_mgl, ph = EXCLUDED.ph, orp_mv = EXCLUDED.orp_mv,
-           temp_c = EXCLUDED.temp_c, quality = EXCLUDED.quality, updated_at = now()
-         WHERE pond_latest.time < EXCLUDED.time
-         RETURNING pond_id`,
-        params,
-      );
-      await notifyPonds(client, changed.map((r) => r.pond_id));
+      const ins = await client.query(sink.insertSql, params);
+      const { rows: changed } = await client.query(sink.latestSql, params);
+      await notify(client, sink, changed.map((r) => r.id));
       await client.query('COMMIT');
       stats.written += ins.rowCount;
     } catch (err) {
@@ -104,30 +144,42 @@ async function flush() {
     } finally {
       client.release();
     }
-    buffer = buffer.slice(batch.length);
+    sink.buffer = sink.buffer.slice(batch.length);
   } catch (err) {
-    console.error(`[ingest] flush failed (${buffer.length} rows buffered): ${err.message}`);
+    console.error(`[ingest] ${sink.name} flush failed (${sink.buffer.length} rows buffered): ${err.message}`);
   } finally {
-    flushing = false;
+    sink.flushing = false;
   }
-  if (buffer.length >= BATCH_MAX) setImmediate(flush);
+  if (sink.buffer.length >= BATCH_MAX) setImmediate(() => flush(sink));
 }
 
-const pondFarm = new Map(); // pondId -> farmId, filled from cache lookups
+const flushAll = () => Promise.all(SINKS.map(flush));
 
-/** NOTIFY pond_update with "<farmId>:<id>,<id>" chunks (payload limit is 8000 bytes). */
-async function notifyPonds(client, pondIds) {
+/** NOTIFY <channel> with "<farmId>:<id>,<id>" chunks (payload limit is 8000 bytes). */
+async function notify(client, sink, ids) {
   const byFarm = new Map();
-  for (const id of pondIds) {
-    const f = pondFarm.get(id);
+  for (const id of ids) {
+    const f = sink.owner.get(id);
     if (!byFarm.has(f)) byFarm.set(f, []);
     byFarm.get(f).push(id);
   }
-  for (const [farmId, ids] of byFarm) {
-    for (let i = 0; i < ids.length; i += 800) {
-      await client.query('SELECT pg_notify($1, $2)', ['pond_update', `${farmId}:${ids.slice(i, i + 800).join(',')}`]);
+  for (const [farmId, list] of byFarm) {
+    for (let i = 0; i < list.length; i += 800) {
+      await client.query('SELECT pg_notify($1, $2)', [sink.channel, `${farmId}:${list.slice(i, i + 800).join(',')}`]);
     }
   }
+}
+
+function enqueue(sink, entity, { samples, dropped }) {
+  sink.owner.set(entity.id, entity.farmId);
+  stats.received += samples.length;
+  stats.dropped += dropped;
+  if (sink.buffer.length + samples.length > BUFFER_MAX) {
+    stats.dropped += samples.length;
+    return;
+  }
+  for (const smp of samples) sink.buffer.push({ ...smp, id: entity.id });
+  if (sink.buffer.length >= BATCH_MAX) flush(sink);
 }
 
 // ---------- state / gateway (low volume: write directly) ----------
@@ -142,11 +194,11 @@ async function handleState(pond, msg) {
       await client.query(
         `INSERT INTO pond_control (pond_id, mode, updated_at) VALUES ($1, $2, $3)
          ON CONFLICT (pond_id) DO UPDATE SET mode = EXCLUDED.mode, updated_at = EXCLUDED.updated_at`,
-        [pond.pondId, st.mode, st.time],
+        [pond.id, st.mode, st.time],
       );
     }
     for (const d of st.devices) {
-      const deviceId = deviceByKey.get(`${pond.pondId}/${d.code}`);
+      const deviceId = deviceByKey.get(`${pond.id}/${d.code}`);
       if (!deviceId) continue;
       await client.query(
         `INSERT INTO device_state (device_id, is_on, current_a, fault, updated_at) VALUES ($1, $2, $3, $4, $5)
@@ -156,7 +208,7 @@ async function handleState(pond, msg) {
         [deviceId, d.on, d.currentA, d.fault, st.time],
       );
     }
-    await client.query('SELECT pg_notify($1, $2)', ['pond_update', `${pond.farmId}:${pond.pondId}`]);
+    await client.query('SELECT pg_notify($1, $2)', ['pond_update', `${pond.farmId}:${pond.id}`]);
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
@@ -189,23 +241,18 @@ async function handleMessage(topic, msg) {
   const t = parseTopic(topic.replace(/^\$share\/[^/]+\//, ''));
   if (!t) return;
   if (t.kind === 'gateway') return handleGateway(t.farm, msg);
+
+  if (t.kind === 'rasTelemetry') {
+    const unit = await lookup(() => unitByKey, t.farm, t.unit);
+    if (!unit) return void stats.unknown++;
+    return enqueue(rasSink, unit, parseRasTelemetry(msg));
+  }
   if (t.kind !== 'telemetry' && t.kind !== 'state') return; // cmdAck / alarm: later phases
 
-  const pond = await lookupPond(t.farm, t.pond);
-  if (!pond) return void stats.unknownPond++;
-  pondFarm.set(pond.pondId, pond.farmId);
-
+  const pond = await lookup(() => pondByKey, t.farm, t.pond);
+  if (!pond) return void stats.unknown++;
   if (t.kind === 'state') return handleState(pond, msg);
-
-  const { samples, dropped } = parseTelemetry(msg);
-  stats.received += samples.length;
-  stats.dropped += dropped;
-  if (buffer.length + samples.length > BUFFER_MAX) {
-    stats.dropped += samples.length;
-    return;
-  }
-  for (const s of samples) buffer.push({ ...s, pondId: pond.pondId });
-  if (buffer.length >= BATCH_MAX) flush();
+  enqueue(pondSink, pond, parseTelemetry(msg));
 }
 
 async function main() {
@@ -219,7 +266,7 @@ async function main() {
       await new Promise((r) => setTimeout(r, 2000));
     }
   }
-  console.log(`[ingest] cache loaded: ${pondByKey.size} ponds`);
+  console.log(`[ingest] cache loaded: ${unitByKey.size} units, ${pondByKey.size} ponds`);
 
   const client = mqtt.connect(MQTT_URL, {
     // Stable client id is required: the broker keeps our queued messages under this id.
@@ -248,18 +295,19 @@ async function main() {
     handleMessage(topic, msg).catch((err) => console.error('[ingest] message failed', err.message));
   });
 
-  setInterval(flush, FLUSH_MS);
+  setInterval(flushAll, FLUSH_MS);
   setInterval(() => reloadCache().catch(() => {}), 5 * 60_000);
   setInterval(() => {
-    console.log(`[ingest] received=${stats.received} written=${stats.written} dropped=${stats.dropped} unknownPond=${stats.unknownPond} buffered=${buffer.length}`);
+    const buffered = SINKS.map((k) => `${k.name}:${k.buffer.length}`).join(' ');
+    console.log(`[ingest] received=${stats.received} written=${stats.written} dropped=${stats.dropped} unknown=${stats.unknown} buffered=${buffered}`);
   }, 60_000);
 
   const shutdown = async () => {
     console.log('[ingest] shutting down, flushing buffer');
     client.end();
-    for (let i = 0; i < 5 && buffer.length; i++) {
-      while (flushing) await new Promise((r) => setTimeout(r, 100));
-      await flush();
+    for (let i = 0; i < 5 && SINKS.some((k) => k.buffer.length); i++) {
+      while (SINKS.some((k) => k.flushing)) await new Promise((r) => setTimeout(r, 100));
+      await flushAll();
     }
     await pool.end();
     process.exit(0);

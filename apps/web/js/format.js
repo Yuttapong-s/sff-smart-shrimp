@@ -8,10 +8,10 @@ export function fmt(metric, v) {
   return v.toFixed(METRIC_INFO[metric].digits);
 }
 
-/** Shorter value for tiles: ORP without decimals, others 1 decimal. */
+/** Shorter value for tiles: ORP / DO% without decimals, others 1 decimal. */
 export function fmtTile(metric, v) {
   if (typeof v !== 'number' || !Number.isFinite(v)) return '–';
-  return metric === 'orp' ? String(Math.round(v)) : v.toFixed(1);
+  return metric === 'orp' || metric === 'doPct' ? String(Math.round(v)) : v.toFixed(1);
 }
 
 export const fmtInt = (n) => (n == null ? '–' : Number(n).toLocaleString('th-TH'));

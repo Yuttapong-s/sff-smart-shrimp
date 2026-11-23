@@ -1,22 +1,31 @@
-// Farm gateway simulator: publishes telemetry + device state for every pond, with an LWT
+// Farm gateway simulator: publishes RAS telemetry per unit, DO telemetry + device state per pond,
+// with an LWT
 // so the cloud sees "gateway offline" when this process dies. Optionally backfills history.
 
 import mqtt from 'mqtt';
-import { generatePondCodes, topics } from '@sff/shared';
-import { makePond, sample, aeratorState } from './model.js';
+import { generateLayout, topics } from '@sff/shared';
+import { makeUnit, makePond, sampleRas, samplePond, aeratorState } from './model.js';
 
 const env = process.env;
 const MQTT_URL = env.MQTT_URL ?? 'mqtt://localhost:1883';
 const FARM = env.SIM_FARM_CODE ?? env.SEED_FARM_CODE ?? 'F1';
-const ZONES = Number(env.SEED_ZONES ?? 10);
-const PER_ZONE = Number(env.SEED_PONDS_PER_ZONE ?? 50);
+const UNITS = Number(env.SEED_UNITS ?? 12);
+const PONDS_MIN = Number(env.SEED_PONDS_MIN ?? 4);
+const PONDS_MAX = Number(env.SEED_PONDS_MAX ?? 6);
 const INTERVAL_SEC = Number(env.SIM_INTERVAL_SEC ?? 10);
 const BACKFILL_HOURS = Number(env.SIM_BACKFILL_HOURS ?? 24);
 const BACKFILL_STEP_SEC = Number(env.SIM_BACKFILL_STEP_SEC ?? 300);
 
-const ponds = generatePondCodes(ZONES, PER_ZONE).map((p, i) => makePond(p.code, 1000 + i));
-const counts = ponds.reduce((a, p) => ((a[p.scenario] = (a[p.scenario] ?? 0) + 1), a), {});
-console.log(`[sim] farm ${FARM}: ${ponds.length} ponds, scenarios`, counts);
+const units = [];
+const ponds = [];
+for (const u of generateLayout({ units: UNITS, min: PONDS_MIN, max: PONDS_MAX })) {
+  const unit = makeUnit(u.unit, 500 + u.unitIndex);
+  units.push(unit);
+  for (const p of u.ponds) ponds.push(makePond(p.code, 1000 + ponds.length, unit));
+}
+const scenarios = (list) => list.filter((x) => x.scenario !== 'normal').map((x) => `${x.code}:${x.scenario}`).join(' ');
+console.log(`[sim] farm ${FARM}: ${units.length} units, ${ponds.length} ponds`);
+console.log(`[sim] scenarios ${scenarios(units)} ${scenarios(ponds)}`);
 
 const client = mqtt.connect(MQTT_URL, {
   clientId: `sff-gateway-sim-${FARM}`,
@@ -41,13 +50,18 @@ async function backfill() {
   const now = Date.now();
   const start = now - BACKFILL_HOURS * 3600_000;
   console.log(`[sim] backfilling ${BACKFILL_HOURS}h at ${BACKFILL_STEP_SEC}s steps...`);
-  for (const p of ponds) {
-    if (p.scenario === 'offline') continue;
+  const series = (fn, x) => {
     const samples = [];
     for (let t = start; t < now - INTERVAL_SEC * 1000; t += BACKFILL_STEP_SEC * 1000) {
-      samples.push({ ...sample(p, t), backfill: true });
+      samples.push({ ...fn(x, t), backfill: true });
     }
-    await pub(topics.telemetry(FARM, p.code), { samples });
+    return { samples };
+  };
+  for (const u of units) {
+    if (u.scenario !== 'ras_offline') await pub(topics.rasTelemetry(FARM, u.code), series(sampleRas, u));
+  }
+  for (const p of ponds) {
+    if (p.scenario !== 'offline') await pub(topics.telemetry(FARM, p.code), series(samplePond, p));
   }
   console.log('[sim] backfill done');
 }
@@ -55,9 +69,12 @@ async function backfill() {
 async function tick() {
   const ts = Date.now();
   const jobs = [];
+  for (const u of units) {
+    if (u.scenario !== 'ras_offline') jobs.push(pub(topics.rasTelemetry(FARM, u.code), sampleRas(u, ts)));
+  }
   for (const p of ponds) {
     if (p.scenario === 'offline') continue;
-    const s = sample(p, ts);
+    const s = samplePond(p, ts);
     jobs.push(pub(topics.telemetry(FARM, p.code), s));
     jobs.push(
       pub(

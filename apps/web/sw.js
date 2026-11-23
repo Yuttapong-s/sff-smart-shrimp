@@ -1,9 +1,10 @@
 // Service worker: app shell works offline; API GETs fall back to the last cached response
 // so the overview still shows the latest known state when signal drops at the ponds.
 
-const VERSION = 'v1';
+// Bump VERSION when the shell or the API response shape changes (v2: units + RAS).
+const VERSION = 'v2';
 const SHELL = `sff-shell-${VERSION}`;
-const API = 'sff-api';
+const API = `sff-api-${VERSION}`;
 
 const SHELL_FILES = [
   '/',
@@ -15,8 +16,10 @@ const SHELL_FILES = [
   '/js/router.js',
   '/js/format.js',
   '/js/components/ts-chart.js',
+  '/js/components/metric-card.js',
   '/js/pages/overview.js',
   '/js/pages/pond.js',
+  '/js/pages/unit.js',
   '/js/pages/alarms.js',
   '/js/pages/manual.js',
   '/js/pages/login.js',
@@ -38,7 +41,7 @@ self.addEventListener('activate', (e) => {
   e.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((k) => k.startsWith('sff-shell-') && k !== SHELL).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => k.startsWith('sff-') && k !== SHELL && k !== API).map((k) => caches.delete(k))))
       .then(() => self.clients.claim()),
   );
 });

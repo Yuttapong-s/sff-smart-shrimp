@@ -1,15 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTelemetry, parseState, parseGateway, QUALITY } from './parse.js';
+import { parseTelemetry, parseRasTelemetry, parseState, parseGateway, BACKFILL } from './parse.js';
 
 const now = Date.parse('2026-01-01T12:00:00Z');
 const b = (o) => Buffer.from(typeof o === 'string' ? o : JSON.stringify(o));
 
 test('single sample with ISO timestamp', () => {
-  const { samples, dropped } = parseTelemetry(b({ ts: '2026-01-01T11:59:00Z', do: 5.2, ph: 7.9, orp: 250, temp: 29 }), now);
+  const { samples, dropped } = parseTelemetry(b({ ts: '2026-01-01T11:59:00Z', do: 5.2, do_pct: 71, temp: 29 }), now);
   assert.equal(dropped, 0);
   assert.equal(samples.length, 1);
   assert.equal(samples[0].do, 5.2);
+  assert.equal(samples[0].doPct, 71);
+  assert.equal(samples[0].ph, undefined);
   assert.equal(samples[0].quality, 0);
 });
 
@@ -26,14 +28,24 @@ test('batch with backfill flag', () => {
     now,
   );
   assert.equal(samples.length, 2);
-  assert.equal(samples[0].quality & QUALITY.BACKFILL, QUALITY.BACKFILL);
+  assert.equal(samples[0].quality & BACKFILL, BACKFILL);
 });
 
 test('out-of-range values are nulled and flagged', () => {
-  const [s] = parseTelemetry(b({ ts: now, do: 99, ph: 7.8 }), now).samples;
+  const [s] = parseTelemetry(b({ ts: now, do: 99, temp: 28.5 }), now).samples;
   assert.equal(s.do, null);
-  assert.equal(s.ph, 7.8);
-  assert.equal(s.quality & QUALITY.do, QUALITY.do);
+  assert.equal(s.temp, 28.5);
+  assert.equal(s.quality, 1);
+});
+
+test('RAS telemetry: pH/ORP/temp with ranges', () => {
+  const [s] = parseRasTelemetry(b({ ts: now, ph: 7.8, orp: -150, temp: 28 }), now).samples;
+  assert.deepEqual({ ph: s.ph, orp: s.orp, temp: s.temp, q: s.quality }, { ph: 7.8, orp: -150, temp: 28, q: 0 });
+  const [bad] = parseRasTelemetry(b({ ts: now, ph: 15, orp: 2500, temp: 28 }), now).samples;
+  assert.equal(bad.ph, null);
+  assert.equal(bad.orp, null);
+  assert.equal(bad.quality, 1 | 2);
+  assert.equal(parseRasTelemetry(b({ ts: now, do: 5 }), now).samples.length, 0, 'pond fields are not RAS fields');
 });
 
 test('drops garbage, missing/future timestamps and all-null samples', () => {

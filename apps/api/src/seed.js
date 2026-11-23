@@ -1,5 +1,5 @@
 import bcrypt from 'bcryptjs';
-import { DEFAULT_THRESHOLDS, generatePondCodes } from '@sff/shared';
+import { DEFAULT_THRESHOLDS, generateLayout } from '@sff/shared';
 import { config } from './config.js';
 
 /** Ensure an owner account exists. */
@@ -14,9 +14,12 @@ export async function seedAdmin(pool) {
   console.log(`[seed] created owner user "${config.adminUser}"`);
 }
 
-/** Demo farm with zones x ponds, 2 aerators per pond, and active crop cycles on ~90% of ponds. */
+/**
+ * Demo farm: N units (one RAS each) with a deterministic 4-6 ponds per unit, 2 aerators per
+ * pond, and active crop cycles on ~90% of ponds.
+ */
 export async function seedDemoFarm(pool) {
-  const { farmCode, farmName, zones, pondsPerZone } = config.seed;
+  const { farmCode, farmName, units, pondsMin, pondsMax } = config.seed;
   const { rowCount } = await pool.query('SELECT 1 FROM farms LIMIT 1');
   if (rowCount) return;
 
@@ -35,26 +38,24 @@ export async function seedDemoFarm(pool) {
       );
     }
 
-    const zoneIds = new Map();
-    const codes = generatePondCodes(zones, pondsPerZone);
-    for (const p of codes) {
-      if (!zoneIds.has(p.zone)) {
-        const {
-          rows: [z],
-        } = await client.query(
-          'INSERT INTO zones (farm_id, code, name, sort) VALUES ($1, $2, $3, $4) RETURNING id',
-          [farm.id, p.zone, `โซน ${p.zone}`, p.zoneIndex],
-        );
-        zoneIds.set(p.zone, z.id);
-      }
+    const layout = generateLayout({ units, min: pondsMin, max: pondsMax });
+    const codes = [];
+    for (const u of layout) {
+      const {
+        rows: [row],
+      } = await client.query(
+        'INSERT INTO units (farm_id, code, name, sort) VALUES ($1, $2, $3, $4) RETURNING id',
+        [farm.id, u.unit, `Unit ${u.unit.slice(1)}`, u.unitIndex],
+      );
+      for (const p of u.ponds) codes.push({ unitId: row.id, code: p.code, index: p.index });
     }
 
-    // Bulk insert ponds.
+    // Bulk insert ponds (the unit trigger still checks the 10-pond limit per row).
     const { rows: ponds } = await client.query(
-      `INSERT INTO ponds (farm_id, zone_id, code, name, area_rai, sort)
-       SELECT $1, z, c, c, 3.0, s FROM unnest($2::int[], $3::text[], $4::int[]) AS t(z, c, s)
+      `INSERT INTO ponds (farm_id, unit_id, code, name, area_rai, sort)
+       SELECT $1, u, c, c, 0.5, s FROM unnest($2::int[], $3::text[], $4::int[]) AS t(u, c, s)
        RETURNING id, code`,
-      [farm.id, codes.map((p) => zoneIds.get(p.zone)), codes.map((p) => p.code), codes.map((p) => p.index)],
+      [farm.id, codes.map((p) => p.unitId), codes.map((p) => p.code), codes.map((p) => p.index)],
     );
 
     const pondIds = ponds.map((p) => p.id);
@@ -81,7 +82,7 @@ export async function seedDemoFarm(pool) {
     );
 
     await client.query('COMMIT');
-    console.log(`[seed] demo farm ${farmCode}: ${zones} zones, ${pondIds.length} ponds, ${active.length} active cycles`);
+    console.log(`[seed] demo farm ${farmCode}: ${layout.length} units, ${pondIds.length} ponds, ${active.length} active cycles`);
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;

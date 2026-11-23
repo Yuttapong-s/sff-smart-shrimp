@@ -1,10 +1,11 @@
-// Pond detail: status, crop cycle, live metric cards, charts, devices, history tabs.
+// Pond detail: status, crop cycle, DO-probe cards, the unit's RAS values, charts, devices, tabs.
 
-import { METRICS, METRIC_INFO, STATUS_LABEL } from '/shared/index.js';
+import { POND_VALUES, RAS_METRICS, METRIC_INFO, STATUS_LABEL } from '/shared/index.js';
 import { api } from '../api.js';
 import { store, subscribe, serverNow } from '../store.js';
 import { goBack } from '../router.js';
-import { createChart, sparkline } from '../components/ts-chart.js';
+import { createChart } from '../components/ts-chart.js';
+import { metricCard } from '../components/metric-card.js';
 import { esc, fmt, fmtInt, fmtDate, fmtDateTime, timeAgo, STATUS_ICON, statusText } from '../format.js';
 
 const RANGES = [
@@ -12,7 +13,6 @@ const RANGES = [
   { key: '7d', label: '7 วัน' },
   { key: 'cycle', label: 'ทั้งรอบ' },
 ];
-const TREND_STEP = { do: 0.2, ph: 0.05, orp: 10, temp: 0.2 };
 const MODE_TEXT = { remote: 'Remote (สั่งจากระบบได้)', local: 'Local (สั่งที่ HMI หน้าฟาร์มเท่านั้น)', unknown: 'ไม่ทราบ' };
 
 export function render(root, { params }) {
@@ -27,6 +27,7 @@ export function render(root, { params }) {
   root.innerHTML = `<div class="skeleton">กำลังโหลดข้อมูลบ่อ…</div>`;
 
   const pondJson = () => store.ponds.get(pondId) ?? detail?.pond;
+  const unitJson = () => (detail?.unit ? store.units.get(detail.unit.id) ?? detail.unit : null);
 
   async function load() {
     try {
@@ -49,7 +50,8 @@ export function render(root, { params }) {
       <div class="reasons" data-reasons></div>
       <div class="pond-meta" data-meta></div>
 
-      <section class="metrics" data-metrics aria-label="ค่าน้ำล่าสุด"></section>
+      <section class="metrics metrics-3" data-metrics aria-label="ค่าน้ำล่าสุดของบ่อ"></section>
+      <a class="card ras-panel" data-ras href="#/unit/${detail.unit?.id ?? ''}"></a>
 
       <section class="card section">
         <div class="section-head">
@@ -59,7 +61,7 @@ export function render(root, { params }) {
           </div>
         </div>
         <div class="charts" data-charts>
-          ${METRICS.map(
+          ${POND_VALUES.map(
             (m) => `<div class="chart-block"><div class="chart-title">${METRIC_INFO[m].label} ${METRIC_INFO[m].unit ? `(${METRIC_INFO[m].unit})` : ''}</div><div class="chart-wrap" data-chart="${m}"></div></div>`,
           ).join('')}
         </div>
@@ -107,13 +109,14 @@ export function render(root, { params }) {
     });
 
     const th = detail.thresholds;
-    charts = METRICS.map((m) => ({
+    charts = POND_VALUES.map((m) => ({
       metric: m,
       chart: createChart(root.querySelector(`[data-chart="${m}"]`), { metric: m, threshold: th[m] }),
     }));
 
     renderHead();
     renderCards();
+    renderRas();
     renderDevices();
     renderTab();
     setChartData(day);
@@ -137,7 +140,7 @@ export function render(root, { params }) {
 
     const c = p.cycle;
     const g = detail.growth;
-    const parts = [`<span>โซน <b>${esc(p.zone)}</b></span>`];
+    const parts = [`<span>Unit <b>${esc(p.unit)}</b></span>`];
     if (c) {
       parts.push(`<span>รอบเลี้ยง <b>#${c.no}</b></span>`);
       parts.push(`<span>DOC <b class="num">${c.doc}</b> วัน</span>`);
@@ -151,44 +154,45 @@ export function render(root, { params }) {
     root.querySelector('[data-meta]').innerHTML = parts.join('');
   }
 
-  function trend(metric) {
-    const vals = day[metric];
-    const ts = day.t;
-    if (!ts.length) return '';
-    const last = vals[vals.length - 1];
-    const target = ts[ts.length - 1] - 30 * 60;
-    let i = ts.length - 1;
-    while (i > 0 && ts[i] > target) i--;
-    const prev = vals[i];
-    if (typeof last !== 'number' || typeof prev !== 'number' || i === ts.length - 1) return '';
-    const d = last - prev;
-    if (Math.abs(d) < TREND_STEP[metric]) return '<span class="trend" title="ทรงตัว (30 นาที)">→</span>';
-    return d > 0
-      ? '<span class="trend" title="เพิ่มขึ้น (30 นาที)">↑</span>'
-      : '<span class="trend" title="ลดลง (30 นาที)">↓</span>';
-  }
-
   function renderCards() {
     const p = pondJson();
-    const sixH = (day.t.at(-1) ?? 0) - 6 * 3600;
-    const start = day.t.findIndex((t) => t >= sixH);
-    root.querySelector('[data-metrics]').innerHTML = METRICS.map((m) => {
-      const pondLevel = p.status === 'idle' || p.status === 'offline';
-      let s = pondLevel ? p.status : p.metricStatus?.[m] ?? 'offline';
-      let tag = s === 'ok' || s === 'idle' ? '' : `<span class="tag s-${s}">${STATUS_ICON[s]} ${STATUS_LABEL[s]}</span>`;
-      if (!pondLevel && s === 'offline') {
-        // Pond is reporting but this probe is not: likely a sensor fault, not a lost connection.
-        s = 'warn';
-        tag = `<span class="tag s-warn">! ไม่มีค่า</span>`;
-      }
-      const missing = !pondLevel && typeof p.latest?.[m] !== 'number';
-      return `<div class="metric" data-s="${s}">
-        <div class="top"><span>${METRIC_INFO[m].label}</span>${tag}</div>
-        <div class="value"><span class="v">${fmt(m, p.latest?.[m])}</span><span class="u">${METRIC_INFO[m].unit}</span>${trend(m)}</div>
-        ${sparkline(start >= 0 ? day[m].slice(start) : [])}
-        <div class="when">${missing ? 'บ่อยังส่งข้อมูล แต่ไม่มีค่านี้ — ตรวจหัววัด' : '6 ชม.ล่าสุด'}</div>
-      </div>`;
+    root.querySelector('[data-metrics]').innerHTML = POND_VALUES.map((m) =>
+      metricCard({
+        metric: m,
+        value: p.latest?.[m],
+        ownerStatus: p.status,
+        metricStatus: p.metricStatus?.[m],
+        series: day,
+        missingText: 'บ่อยังส่งข้อมูล แต่ไม่มีค่านี้ — ตรวจหัววัด DO',
+      }),
+    ).join('');
+  }
+
+  /** The unit's shared RAS water: pH / ORP / temp (read-only here, details on the unit page). */
+  function renderRas() {
+    const u = unitJson();
+    const el = root.querySelector('[data-ras]');
+    if (!u) {
+      el.hidden = true;
+      return;
+    }
+    const r = u.ras;
+    const vals = RAS_METRICS.map((m) => {
+      const ms = r.status === 'offline' ? 'offline' : r.metricStatus?.[m] ?? 'offline';
+      const shown = ms === 'offline' && r.status !== 'offline' ? 'warn' : ms;
+      const unit = METRIC_INFO[m].unit;
+      return `<span class="ras-chip ms-${shown}">${shown === 'crit' || shown === 'warn' ? STATUS_ICON[shown] : ''}${METRIC_INFO[m].label} <b class="num">${fmt(m, r.latest?.[m])}</b>${unit ? ` ${unit}` : ''}</span>`;
     }).join('');
+    el.className = `card ras-panel ras-${r.status}`;
+    el.innerHTML = `
+      <div class="ras-panel-head">
+        <b>น้ำระบบ RAS · Unit ${esc(u.code)}</b>
+        <span class="status-pill s-${r.status}">${STATUS_ICON[r.status]} ${STATUS_LABEL[r.status]}</span>
+        <span class="muted small">${esc(timeAgo(r.latest?.time, serverNow()))}</span>
+        <span class="uh-go" aria-hidden="true">›</span>
+      </div>
+      <div class="ras-chips">${vals}</div>
+      ${r.reasons.length ? `<div class="small" style="margin-top:6px">${esc(r.reasons.map((x) => x.text).join(', '))}</div>` : ''}`;
   }
 
   function renderDevices() {
@@ -250,10 +254,10 @@ export function render(root, { params }) {
     } else {
       body.innerHTML = table(
         ['หัววัด', 'Calibrate ล่าสุด', 'ครบกำหนด'],
-        METRICS.map((m) => {
+        ['do'].map((m) => {
           const c = detail.calibrations.find((x) => x.metric === m);
           const due = c?.next_due && Date.parse(c.next_due) < Date.now();
-          return `<tr><td>${METRIC_INFO[m].label}</td><td>${c ? fmtDateTime(c.calibrated_at) : '<span class="muted">ไม่มีบันทึก</span>'}</td>
+          return `<tr><td>${METRIC_INFO[m].label} (หัววัด DO ในบ่อ)</td><td>${c ? fmtDateTime(c.calibrated_at) : '<span class="muted">ไม่มีบันทึก</span>'}</td>
             <td>${c?.next_due ? `${fmtDate(c.next_due)}${due ? ' <span class="status-pill s-warn">! เลยกำหนด</span>' : ''}` : '–'}</td></tr>`;
         }),
       );
@@ -279,22 +283,28 @@ export function render(root, { params }) {
 
   let lastDeviceFetch = 0;
   const unsub = subscribe((type, ids) => {
-    if (!detail || (type !== 'ponds' && type !== 'reset')) return;
+    if (!detail) return;
+    if (type === 'units') {
+      if (detail.unit && ids.includes(detail.unit.id)) renderRas();
+      return;
+    }
+    if (type !== 'ponds' && type !== 'reset') return;
     if (type === 'ponds' && !ids.includes(pondId)) return;
     const p = pondJson();
     const t = p.latest ? Date.parse(p.latest.time) / 1000 : null;
     if (t && t > (day.t.at(-1) ?? 0)) {
       day.t.push(t);
-      for (const m of METRICS) day[m].push(p.latest[m] ?? null);
+      for (const m of POND_VALUES) day[m].push(p.latest[m] ?? null);
       const cutoff = t - 24 * 3600;
       while (day.t.length && day.t[0] < cutoff) {
         day.t.shift();
-        for (const m of METRICS) day[m].shift();
+        for (const m of POND_VALUES) day[m].shift();
       }
       if (range === '24h') setChartData(day);
     }
     renderHead();
     renderCards();
+    renderRas();
     renderDevices();
     if (Date.now() - lastDeviceFetch > 15_000) {
       lastDeviceFetch = Date.now();

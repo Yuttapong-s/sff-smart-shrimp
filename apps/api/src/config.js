@@ -14,8 +14,9 @@ export const config = {
     enabled: env.SEED_DEMO !== 'false',
     farmCode: env.SEED_FARM_CODE ?? 'F1',
     farmName: env.SEED_FARM_NAME ?? 'ฟาร์ม SFF',
-    zones: Number(env.SEED_ZONES ?? 10),
-    pondsPerZone: Number(env.SEED_PONDS_PER_ZONE ?? 50),
+    units: Number(env.SEED_UNITS ?? 12),
+    pondsMin: Number(env.SEED_PONDS_MIN ?? 4),
+    pondsMax: Number(env.SEED_PONDS_MAX ?? 6),
   },
 };
 

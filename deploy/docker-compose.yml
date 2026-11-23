@@ -31,7 +31,7 @@ services:
       EMQX_NODE__COOKIE: ${EMQX_NODE_COOKIE:-sff-emqx-cookie-change-me}
       EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DASHBOARD_PASSWORD:?set EMQX_DASHBOARD_PASSWORD}
       # Queue for offline persistent sessions (ingest restart / DB maintenance). Default 1000 is
-      # one simulator tick; 500k ~ 8 h of 500 ponds at 1 sample/min (+ state messages).
+      # far too small; 500k covers many hours of hundreds of ponds + RAS at 1 sample/min.
       EMQX_MQTT__MAX_MQUEUE_LEN: "500000"
       EMQX_MQTT__SESSION_EXPIRY_INTERVAL: 24h
     ports:
@@ -64,8 +64,9 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD}
       SEED_DEMO: ${SEED_DEMO:-false}
       SEED_FARM_CODE: ${SEED_FARM_CODE:-F1}
-      SEED_ZONES: ${SEED_ZONES:-10}
-      SEED_PONDS_PER_ZONE: ${SEED_PONDS_PER_ZONE:-50}
+      SEED_UNITS: ${SEED_UNITS:-12}
+      SEED_PONDS_MIN: ${SEED_PONDS_MIN:-4}
+      SEED_PONDS_MAX: ${SEED_PONDS_MAX:-6}
     depends_on:
       db:
         condition: service_healthy

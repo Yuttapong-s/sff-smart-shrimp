@@ -11,6 +11,21 @@ VPS (Docker): Caddy → api (Express + SSE) │ ingest │ EMQX │ PostgreSQL +
                                        Web Push / LINE / SMS → PWA
 ```
 
+## ผังฟาร์ม
+
+- ฟาร์มแบ่งเป็น **Unit** โดย 1 Unit = 1 ระบบ **RAS** (น้ำหมุนเวียนที่ใช้ร่วมกัน) มีบ่อได้ 1–10 บ่อ
+- รหัส: Unit `U01`…, บ่อ `U01-P01`…
+- หัววัดแยกตามตำแหน่ง
+
+| ตำแหน่ง | หัววัด | ค่า (คอลัมน์) |
+|---|---|---|
+| บ่อ | DO | `do_mgl` (mg/L), `do_pct` (% อิ่มตัว), `temp_c` |
+| RAS ของ Unit | pH | `ph` (0–14), `temp_c` |
+| RAS ของ Unit | ORP | `orp_mv` (−2000…2000 mV) |
+
+สถานะบ่อคิดจาก DO และอุณหภูมิของบ่อ ส่วนสถานะ RAS คิดจาก pH, ORP และอุณหภูมิ แยกกัน
+หน้าภาพรวมแสดงสถานะ RAS ที่หัวการ์ด Unit และนับแยกเป็น "RAS ผิดปกติ"
+
 **หลักสำคัญ:** การควบคุมที่ชี้เป็นชี้ตาย (DO ต่ำ → เปิดเครื่องตีน้ำ, ไฟดับ, siren) ทำที่ PLC หน้าฟาร์ม
 ระบบ cloud ใช้ดูภาพรวม แจ้งเตือน และสั่งงาน manual — เน็ตหลุดหรือ VPS ล่ม ฟาร์มต้องยังทำงานได้
 
@@ -20,13 +35,13 @@ VPS (Docker): Caddy → api (Express + SSE) │ ingest │ EMQX │ PostgreSQL +
 |---|---|
 | `apps/api` | Express: REST, auth (JWT cookie + role), SSE realtime, เสิร์ฟ PWA, รัน migration |
 | `apps/ingest` | MQTT → TimescaleDB แบบ batch, อัปเดต `pond_latest`, NOTIFY ให้ api |
-| `apps/simulator` | จำลอง gateway ฟาร์ม 500 บ่อ (ใช้ demo / load test) |
+| `apps/simulator` | จำลอง gateway ฟาร์ม: RAS ทุก Unit และหัววัด DO ทุกบ่อ (ใช้ demo / load test) |
 | `apps/web` | PWA (HTML/CSS/vanilla JS modules, uPlot) |
 | `packages/shared` | เกณฑ์ค่าน้ำ, การประเมินสถานะบ่อ, MQTT topics — ใช้ร่วมกันทั้ง server และ browser |
-| `db/migrations` | schema, hypertable, compression, continuous aggregates, retention |
+| `db/migrations` | schema (`units`, `ponds`, `sensor_readings`, `ras_readings`, …), hypertable, compression, continuous aggregates, retention |
 | `deploy` | docker-compose, Caddyfile, `.env.example` |
 
-## เริ่มใช้งานบนเครื่อง (demo 500 บ่อ)
+## เริ่มใช้งานบนเครื่อง (demo 12 Unit)
 
 ```sh
 cd deploy
@@ -37,8 +52,11 @@ docker compose --env-file .env --profile sim up -d --build
 
 เปิด http://localhost:8080 แล้วเข้าสู่ระบบด้วย `ADMIN_USER` / `ADMIN_PASSWORD`
 
-Simulator จะส่งข้อมูลย้อนหลัง 48 ชม. แล้วส่งค่าปัจจุบันทุก 10 วินาที และสุ่มให้บางบ่อมีปัญหา
-(DO ต่ำ, pH สูง, หัววัด pH เสีย, ขาดการติดต่อ) — บ่อ DO ต่ำจะเป็น "วิกฤต" ช่วงกลางคืนถึงเช้ามืด
+Seed สร้าง 12 Unit มีบ่อ Unit ละ 4–6 บ่อ (`SEED_UNITS`, `SEED_PONDS_MIN`, `SEED_PONDS_MAX`)
+Simulator ส่งข้อมูลย้อนหลัง 48 ชม. แล้วส่งค่าปัจจุบันทุก 10 วินาที และกำหนดกรณีผิดปกติไว้ตายตัว
+
+- บ่อ: `U02-P02` DO ต่ำวิกฤตช่วงกลางคืน, `U05-P03` และ `U08-P01` DO ก้ำกึ่ง, `U10-P04` ขาดการติดต่อ, `U12-P02` ไม่มีค่า DO %
+- RAS: `U03` pH สูง, `U06` ORP ต่ำ, `U09` หัววัด pH เสีย, `U11` ขาดการติดต่อ
 
 ทดสอบ: `npm install && npm test`
 
@@ -46,13 +64,15 @@ Simulator จะส่งข้อมูลย้อนหลัง 48 ชม. �
 
 | Topic | QoS / retain | Payload |
 |---|---|---|
-| `sff/{farm}/{pond}/telemetry` | 1 | `{"ts":"2026-01-01T10:00:00+07:00","do":5.2,"ph":7.9,"orp":250,"temp":29.1}` หรือ batch `{"samples":[{...,"backfill":true}]}` |
+| `sff/{farm}/{pond}/telemetry` | 1 | หัววัด DO ในบ่อ: `{"ts":"2026-01-01T10:00:00+07:00","do":5.2,"do_pct":71,"temp":29.1}` หรือ batch `{"samples":[{...,"backfill":true}]}` |
+| `sff/{farm}/{unit}/ras/telemetry` | 1 | หัววัด RAS ของ Unit: `{"ts":...,"ph":7.9,"orp":250,"temp":29.0}` หรือ batch แบบเดียวกัน |
 | `sff/{farm}/{pond}/state` | 1, retain | `{"ts":...,"mode":"remote","devices":[{"code":"AE1","on":true,"current_a":12.1,"fault":false}]}` |
 | `sff/{farm}/gateway/status` | 1, retain, **LWT** | `{"online":true}` (LWT: `{"online":false}`) |
 | `sff/{farm}/{pond}/cmd` | 1, **ห้าม retain** | (เฟสควบคุมอุปกรณ์) `{"id":"uuid","device":"AE1","action":"on","expires_at":...}` |
 | `sff/{farm}/{pond}/cmd/ack` | 1 | (เฟสควบคุมอุปกรณ์) |
 
-- `ts` ต้องเป็นเวลาที่วัดจริงจากต้นทาง (ตั้ง NTP ที่ IPC/PLC) — ส่งซ้ำได้ ระบบตัดข้อมูลซ้ำด้วย `(pond_id, time)`
+- `{pond}` คือรหัสบ่อ เช่น `U01-P01` และ `{unit}` คือรหัส Unit เช่น `U01`
+- `ts` ต้องเป็นเวลาที่วัดจริงจากต้นทาง (ตั้ง NTP ที่ IPC/PLC) — ส่งซ้ำได้ ระบบตัดข้อมูลซ้ำด้วย `(pond_id, time)` และ `(unit_id, time)`
 - Gateway ควรเก็บข้อมูลไว้ตอนเน็ตหลุดแล้วส่งย้อนหลังเป็น batch พร้อม `"backfill": true` (รับย้อนหลังได้ 30 วัน)
 - `device_state` คือสถานะจริงจาก feedback ของ PLC (aux contact / กระแสมอเตอร์) ไม่ใช่ "สั่งแล้ว"
 
@@ -69,7 +89,8 @@ Simulator จะส่งข้อมูลย้อนหลัง 48 ชม. �
 ## สถานะงาน
 
 - [x] Foundation: compose, schema + Timescale policies, auth/RBAC, CI
-- [x] Ingest + simulator + หน้าภาพรวม (grid หลายร้อยบ่อ) + หน้ารายละเอียดบ่อ (realtime ผ่าน SSE)
+- [x] Ingest + simulator + หน้าภาพรวม + หน้ารายละเอียดบ่อ (realtime ผ่าน SSE)
+- [x] โครงสร้าง Unit/RAS: การ์ด Unit แสดงค่า RAS, หน้ารายละเอียด RAS, หัววัด DO ในบ่อ
 - [ ] บันทึกค่าน้ำ / ผล lab / รอบการเลี้ยง แบบ offline-first
 - [ ] Alert engine: rules + hold time, Web Push + LINE + SMS, ack + escalation
 - [ ] สั่งงานอุปกรณ์: cmd → ack → state, หมดอายุคำสั่ง, Local/Remote, audit log

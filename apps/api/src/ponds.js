@@ -4,14 +4,14 @@ import { evaluatePond, thresholdsFromRules, dayOfCulture } from '@sff/shared';
 import { pool } from './db.js';
 
 const POND_SELECT = `
-  SELECT p.id, p.farm_id, p.code, p.name, z.code AS zone,
-         l.time, l.do_mgl, l.ph, l.orp_mv, l.temp_c, l.quality,
+  SELECT p.id, p.farm_id, p.code, p.name, u.id AS unit_id, u.code AS unit,
+         l.time, l.do_mgl, l.do_pct, l.temp_c, l.quality,
          c.id AS cycle_id, c.cycle_no, c.stocked_at, c.stocked_count,
          COALESCE(d.on_count, 0) AS aer_on, COALESCE(d.total, 0) AS aer_total,
          COALESCE(d.fault_count, 0) AS aer_fault,
          COALESCE(pc.mode, 'unknown') AS mode
   FROM ponds p
-  JOIN zones z ON z.id = p.zone_id
+  JOIN units u ON u.id = p.unit_id
   LEFT JOIN pond_latest l ON l.pond_id = p.id
   LEFT JOIN crop_cycles c ON c.pond_id = p.id AND c.status = 'active'
   LEFT JOIN pond_control pc ON pc.pond_id = p.id
@@ -37,7 +37,7 @@ export async function getThresholds(farmId) {
 
 export function toPondJson(r, thresholds, now = Date.now()) {
   const latest = r.time
-    ? { time: r.time.toISOString(), do: r.do_mgl, ph: r.ph, orp: r.orp_mv, temp: r.temp_c, quality: r.quality }
+    ? { time: r.time.toISOString(), do: r.do_mgl, doPct: r.do_pct, temp: r.temp_c, quality: r.quality }
     : null;
   const cycle = r.cycle_id
     ? {
@@ -53,7 +53,8 @@ export function toPondJson(r, thresholds, now = Date.now()) {
     id: r.id,
     code: r.code,
     name: r.name,
-    zone: r.zone,
+    unit: r.unit,
+    unitId: r.unit_id,
     latest,
     cycle,
     aerators: { on: r.aer_on, total: r.aer_total, fault: r.aer_fault },
@@ -64,15 +65,19 @@ export function toPondJson(r, thresholds, now = Date.now()) {
   };
 }
 
-export async function listPonds(farmId, pondIds = null) {
+export async function listPonds(farmId, pondIds = null, unitId = null) {
   const params = [farmId];
   let where = 'WHERE p.farm_id = $1';
   if (pondIds) {
     params.push(pondIds);
-    where += ' AND p.id = ANY($2::int[])';
+    where += ` AND p.id = ANY($${params.length}::int[])`;
+  }
+  if (unitId) {
+    params.push(unitId);
+    where += ` AND p.unit_id = $${params.length}`;
   }
   const [{ rows }, thresholds] = await Promise.all([
-    pool.query(`${POND_SELECT} ${where} ORDER BY z.sort, p.sort`, params),
+    pool.query(`${POND_SELECT} ${where} ORDER BY u.sort, p.sort`, params),
     getThresholds(farmId),
   ]);
   const now = Date.now();
@@ -86,32 +91,54 @@ export async function getPond(pondId) {
 }
 
 /**
- * Pick the cheapest source for a chart range.
- * Raw for <= 24h, 5-minute aggregate up to 7 days, hourly beyond.
+ * Pick the cheapest source for a chart range: raw for <= 24h, 5-minute aggregate up to
+ * 7 days, hourly beyond. `kind` is 'sensor' (pond DO probes) or 'ras' (unit RAS probes).
  */
-export function readingSource(rangeSec) {
-  if (rangeSec <= 24 * 3600) return { table: 'sensor_readings', time: 'time' };
-  if (rangeSec <= 7 * 86400) return { table: 'sensor_5m', time: 'bucket' };
-  return { table: 'sensor_1h', time: 'bucket' };
+export function readingSource(rangeSec, kind = 'sensor') {
+  const raw = kind === 'ras' ? 'ras_readings' : 'sensor_readings';
+  if (rangeSec <= 24 * 3600) return { table: raw, time: 'time' };
+  if (rangeSec <= 7 * 86400) return { table: `${kind}_5m`, time: 'bucket' };
+  return { table: `${kind}_1h`, time: 'bucket' };
 }
 
-/** Columnar (uPlot-friendly) readings: {t: [epochSec], do: [], ph: [], orp: [], temp: []}. */
-export async function getReadings(pondId, fromMs, toMs) {
-  const { table, time } = readingSource((toMs - fromMs) / 1000);
+/**
+ * Columnar (uPlot-friendly) series: {source, from, to, t: [epochSec], <key>: [...]}.
+ * @param {{kind: 'sensor'|'ras', keyCol: string, id: number, columns: Record<string,string>}} q
+ *   columns: output key -> SQL column
+ */
+export async function getSeries({ kind, keyCol, id, columns }, fromMs, toMs) {
+  const { table, time } = readingSource((toMs - fromMs) / 1000, kind);
+  const entries = Object.entries(columns);
   const { rows } = await pool.query(
-    `SELECT extract(epoch FROM ${time})::float8 AS t, do_mgl, ph, orp_mv, temp_c
+    `SELECT extract(epoch FROM ${time})::float8 AS t, ${entries.map(([, c]) => c).join(', ')}
      FROM ${table}
-     WHERE pond_id = $1 AND ${time} >= to_timestamp($2) AND ${time} <= to_timestamp($3)
+     WHERE ${keyCol} = $1 AND ${time} >= to_timestamp($2) AND ${time} <= to_timestamp($3)
      ORDER BY ${time}`,
-    [pondId, fromMs / 1000, toMs / 1000],
+    [id, fromMs / 1000, toMs / 1000],
   );
-  const out = { source: table, from: fromMs / 1000, to: toMs / 1000, t: [], do: [], ph: [], orp: [], temp: [] };
+  const out = { source: table, from: fromMs / 1000, to: toMs / 1000, t: [] };
+  for (const [k] of entries) out[k] = [];
   for (const r of rows) {
     out.t.push(r.t);
-    out.do.push(r.do_mgl);
-    out.ph.push(r.ph);
-    out.orp.push(r.orp_mv);
-    out.temp.push(r.temp_c);
+    for (const [k, c] of entries) out[k].push(r[c]);
   }
   return out;
+}
+
+/** Pond DO-probe series: {t, do, doPct, temp}. */
+export function getReadings(pondId, fromMs, toMs) {
+  return getSeries(
+    { kind: 'sensor', keyCol: 'pond_id', id: pondId, columns: { do: 'do_mgl', doPct: 'do_pct', temp: 'temp_c' } },
+    fromMs,
+    toMs,
+  );
+}
+
+/** RAS series of a unit: {t, ph, orp, temp}. */
+export function getRasReadings(unitId, fromMs, toMs) {
+  return getSeries(
+    { kind: 'ras', keyCol: 'unit_id', id: unitId, columns: { ph: 'ph', orp: 'orp_mv', temp: 'temp_c' } },
+    fromMs,
+    toMs,
+  );
 }

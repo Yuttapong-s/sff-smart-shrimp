@@ -1,10 +1,15 @@
-// Water-quality thresholds and pond status evaluation.
+// Water-quality thresholds and pond / RAS status evaluation.
 // Browser-compatible (no Node imports): served to the PWA at /shared/.
 
-export const METRICS = ['do', 'ph', 'orp', 'temp'];
+// Pond DO probe gives DO (mg/L), DO saturation (%) and temperature.
+// RAS (one per unit) has a pH probe (pH + temperature) and an ORP probe.
+export const POND_METRICS = ['do', 'temp']; // drive pond status
+export const POND_VALUES = ['do', 'doPct', 'temp']; // everything shown for a pond
+export const RAS_METRICS = ['ph', 'orp', 'temp'];
 
 export const METRIC_INFO = {
   do: { label: 'DO', unit: 'mg/L', digits: 1, column: 'do_mgl' },
+  doPct: { label: 'DO', unit: '%', digits: 0, column: 'do_pct' },
   ph: { label: 'pH', unit: '', digits: 2, column: 'ph' },
   orp: { label: 'ORP', unit: 'mV', digits: 0, column: 'orp_mv' },
   temp: { label: 'อุณหภูมิ', unit: '°C', digits: 1, column: 'temp_c' },
@@ -61,28 +66,18 @@ export function evaluateMetric(metric, value, thresholds = DEFAULT_THRESHOLDS) {
 }
 
 /**
- * Evaluate a pond's overall status from its latest reading.
- * @param {object} p
- * @param {object|null} p.latest  {time, do, ph, orp, temp}
- * @param {boolean} p.active      pond has an active crop cycle
- * @param {number} [p.now]        epoch ms
- * @param {object} [p.thresholds]
- * @param {number} [p.staleAfterSec]
+ * Evaluate a set of metrics from one latest reading.
+ * @returns {{metrics: object, reasons: object[], stale: boolean, live: string}}
+ *   live = status ignoring staleness (ok/warn/crit), with a missing value on live data as warn.
  */
-export function evaluatePond({
-  latest,
-  active,
-  now = Date.now(),
-  thresholds = DEFAULT_THRESHOLDS,
-  staleAfterSec = STALE_AFTER_SEC,
-}) {
+export function evaluateReadings(metricList, latest, { now = Date.now(), thresholds = DEFAULT_THRESHOLDS, staleAfterSec = STALE_AFTER_SEC } = {}) {
   const metrics = {};
   const reasons = [];
-
   const ageSec = latest?.time ? (now - new Date(latest.time).getTime()) / 1000 : Infinity;
   const stale = ageSec > staleAfterSec;
+  let live = STATUS.OK;
 
-  for (const m of METRICS) {
+  for (const m of metricList) {
     const { status, direction } = stale
       ? { status: STATUS.OFFLINE, direction: null }
       : evaluateMetric(m, latest?.[m], thresholds);
@@ -91,33 +86,44 @@ export function evaluatePond({
       const level = status === STATUS.CRIT ? 'วิกฤต' : '';
       const dir = direction === 'low' ? 'ต่ำ' : 'สูง';
       reasons.push({ metric: m, status, text: `${METRIC_INFO[m].label} ${dir}${level}` });
-    }
-  }
-
-  if (!active) {
-    return { status: STATUS.IDLE, metrics, reasons: [], stale };
-  }
-  if (stale) {
-    return {
-      status: STATUS.OFFLINE,
-      metrics,
-      reasons: [{ metric: null, status: STATUS.OFFLINE, text: 'ไม่มีข้อมูลล่าสุด' }],
-      stale,
-    };
-  }
-
-  // A missing individual value on a live pond counts as a warning (likely sensor fault).
-  let status = STATUS.OK;
-  for (const m of METRICS) {
-    if (metrics[m] === STATUS.OFFLINE) {
+      live = worstStatus(live, status);
+    } else if (status === STATUS.OFFLINE && !stale) {
+      // A missing individual value on live data counts as a warning (likely probe fault).
       reasons.push({ metric: m, status: STATUS.WARN, text: `ไม่มีค่า ${METRIC_INFO[m].label}` });
-      status = worstStatus(status, STATUS.WARN);
-    } else {
-      status = worstStatus(status, metrics[m]);
+      live = worstStatus(live, STATUS.WARN);
     }
   }
   reasons.sort((a, b) => statusRank(b.status) - statusRank(a.status));
-  return { status, metrics, reasons, stale };
+  return { metrics, reasons, stale, live };
+}
+
+const OFFLINE_REASON = { metric: null, status: STATUS.OFFLINE, text: 'ไม่มีข้อมูลล่าสุด' };
+
+/**
+ * Evaluate a pond's overall status from its latest DO-probe reading.
+ * @param {object} p
+ * @param {object|null} p.latest  {time, do, doPct, temp}
+ * @param {boolean} p.active      pond has an active crop cycle
+ * @param {number} [p.now]        epoch ms
+ * @param {object} [p.thresholds]
+ * @param {number} [p.staleAfterSec]
+ */
+export function evaluatePond({ latest, active, ...opts }) {
+  const r = evaluateReadings(POND_METRICS, latest, opts);
+  if (!active) return { status: STATUS.IDLE, metrics: r.metrics, reasons: [], stale: r.stale };
+  if (r.stale) return { status: STATUS.OFFLINE, metrics: r.metrics, reasons: [OFFLINE_REASON], stale: true };
+  return { status: r.live, metrics: r.metrics, reasons: r.reasons, stale: false };
+}
+
+/**
+ * Evaluate a unit's RAS (pH / ORP / temp). A RAS is always running, so there is no idle state.
+ * @param {object} p
+ * @param {object|null} p.latest  {time, ph, orp, temp}
+ */
+export function evaluateRas({ latest, ...opts }) {
+  const r = evaluateReadings(RAS_METRICS, latest, opts);
+  if (r.stale) return { status: STATUS.OFFLINE, metrics: r.metrics, reasons: [OFFLINE_REASON], stale: true };
+  return { status: r.live, metrics: r.metrics, reasons: r.reasons, stale: false };
 }
 
 /** Convert alarm_rules DB rows into the thresholds shape. */
@@ -138,7 +144,8 @@ export function thresholdsFromRules(rules) {
 // Physically plausible ranges; values outside are treated as sensor faults.
 export const PHYSICAL_RANGE = {
   do: [0, 25],
+  doPct: [0, 300],
   ph: [0, 14],
-  orp: [-1000, 1000],
+  orp: [-2000, 2000],
   temp: [-5, 60],
 };

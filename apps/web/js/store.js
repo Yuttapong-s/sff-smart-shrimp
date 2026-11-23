@@ -1,19 +1,20 @@
 // Farm state shared by all pages: one overview load, then live SSE patches.
-// Status is re-evaluated locally every 30 s so ponds that stop reporting turn "offline"
-// even when no new event arrives.
+// Status is re-evaluated locally every 30 s so ponds / RAS that stop reporting turn
+// "offline" even when no new event arrives.
 
-import { evaluatePond, DEFAULT_THRESHOLDS } from '/shared/index.js';
+import { evaluatePond, evaluateRas, DEFAULT_THRESHOLDS } from '/shared/index.js';
 import { api, openStream } from './api.js';
 
 const listeners = new Set();
 
 export const store = {
   farm: null,
-  zones: [],
   thresholds: DEFAULT_THRESHOLDS,
   openAlarms: 0,
+  units: new Map(), // id -> unit json (with .ras)
+  unitOrder: [], // unit ids in sort order
   ponds: new Map(), // id -> pond json
-  order: [], // pond ids in zone/sort order
+  order: [], // pond ids in unit/sort order
   conn: 'connecting',
   serverOffsetMs: 0, // serverTime - clientTime
   loadedAt: 0,
@@ -43,6 +44,18 @@ function reevaluate(p) {
   return changed;
 }
 
+function reevaluateRas(u) {
+  const ev = evaluateRas({ latest: u.ras.latest, now: serverNow(), thresholds: store.thresholds });
+  const changed = ev.status !== u.ras.status;
+  Object.assign(u.ras, { status: ev.status, metricStatus: ev.metrics, reasons: ev.reasons });
+  return changed;
+}
+
+export const unitByCode = (code) => [...store.units.values()].find((u) => u.code === code);
+
+/** RAS is abnormal: warn / crit / offline. */
+export const rasProblem = (u) => ['warn', 'crit', 'offline'].includes(u.ras.status);
+
 let closeStream = null;
 let staleTimer = null;
 
@@ -50,7 +63,8 @@ export async function loadFarm(farmId) {
   const o = await api.overview(farmId);
   syncClock(o.serverTime);
   store.farm = o.farm;
-  store.zones = o.zones;
+  store.units = new Map(o.units.map((u) => [u.id, u]));
+  store.unitOrder = o.units.map((u) => u.id);
   store.thresholds = o.thresholds;
   store.openAlarms = o.openAlarms;
   store.ponds = new Map(o.ponds.map((p) => [p.id, p]));
@@ -75,6 +89,16 @@ export async function loadFarm(farmId) {
       }
       if (ids.length) emit('ponds', ids);
     },
+    onUnits: ({ serverTime, units }) => {
+      syncClock(serverTime);
+      const ids = [];
+      for (const u of units) {
+        if (!store.units.has(u.id)) continue;
+        store.units.set(u.id, u);
+        ids.push(u.id);
+      }
+      if (ids.length) emit('units', ids);
+    },
     onFarm: (f) => {
       Object.assign(store.farm, f);
       emit('farm');
@@ -86,6 +110,9 @@ export async function loadFarm(farmId) {
     const ids = [];
     for (const p of store.ponds.values()) if (reevaluate(p)) ids.push(p.id);
     if (ids.length) emit('ponds', ids);
+    const uids = [];
+    for (const u of store.units.values()) if (reevaluateRas(u)) uids.push(u.id);
+    if (uids.length) emit('units', uids);
   }, 30_000);
 }
 

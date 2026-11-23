@@ -1,19 +1,21 @@
 // Server-Sent Events hub. Ingest writes data and NOTIFYs; we LISTEN, re-read the affected
 // ponds, and push the same JSON shape the overview returns. Updates are coalesced per farm
-// so a burst of MQTT messages produces at most one SSE event per second.
+// so a burst of MQTT messages (pond or RAS) produces at most one SSE event per second.
 
 import pg from 'pg';
 import { config } from './config.js';
 import { pool } from './db.js';
 import { listPonds } from './ponds.js';
+import { listUnits } from './units.js';
 
-const CHANNELS = ['pond_update', 'farm_update'];
+const CHANNELS = ['pond_update', 'ras_update', 'farm_update'];
 const FLUSH_MS = 1000;
 
 /** farmId -> Set<res> */
 const clients = new Map();
-/** farmId -> Set<pondId> pending */
+/** farmId -> Set<pondId> / Set<unitId> pending */
 const pending = new Map();
+const pendingUnits = new Map();
 const pendingFarm = new Set();
 let flushTimer = null;
 
@@ -29,6 +31,8 @@ async function flush() {
   flushTimer = null;
   const batch = [...pending.entries()];
   pending.clear();
+  const unitBatch = [...pendingUnits.entries()];
+  pendingUnits.clear();
   const farms = [...pendingFarm];
   pendingFarm.clear();
 
@@ -39,6 +43,15 @@ async function flush() {
       broadcast(farmId, 'ponds', { serverTime: new Date().toISOString(), ponds });
     } catch (err) {
       console.error('[stream] flush failed', err.message);
+    }
+  }
+  for (const [farmId, ids] of unitBatch) {
+    if (!clients.get(farmId)?.size) continue;
+    try {
+      const units = await listUnits(farmId, [...ids]);
+      broadcast(farmId, 'units', { serverTime: new Date().toISOString(), units });
+    } catch (err) {
+      console.error('[stream] unit flush failed', err.message);
     }
   }
   for (const farmId of farms) {
@@ -59,14 +72,15 @@ function schedule() {
 }
 
 function onNotify(msg) {
-  // payload: "<farmId>:<pondId>,<pondId>,..."  or  "<farmId>" for farm_update
+  // payload: "<farmId>:<id>,<id>,..." (pond ids / unit ids)  or  "<farmId>" for farm_update
   const [farmPart, idsPart] = msg.payload.split(':');
   const farmId = Number(farmPart);
   if (msg.channel === 'farm_update') {
     pendingFarm.add(farmId);
   } else {
-    if (!pending.has(farmId)) pending.set(farmId, new Set());
-    const set = pending.get(farmId);
+    const target = msg.channel === 'ras_update' ? pendingUnits : pending;
+    if (!target.has(farmId)) target.set(farmId, new Set());
+    const set = target.get(farmId);
     for (const id of idsPart?.split(',') ?? []) if (id) set.add(Number(id));
   }
   schedule();

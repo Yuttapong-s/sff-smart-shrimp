@@ -1,8 +1,20 @@
 // Payload validation. Bad input is dropped (with a reason) rather than crashing ingest.
 
-import { METRICS, PHYSICAL_RANGE } from '@sff/shared';
+import { PHYSICAL_RANGE } from '@sff/shared';
 
-export const QUALITY = { do: 1, ph: 2, orp: 4, temp: 8, BACKFILL: 16 };
+export const BACKFILL = 16;
+
+// Field spec per probe set: payload key -> sample key, and its quality bit (value out of range).
+export const POND_FIELDS = [
+  { src: 'do', key: 'do', bit: 1 },
+  { src: 'do_pct', key: 'doPct', bit: 2 },
+  { src: 'temp', key: 'temp', bit: 4 },
+];
+export const RAS_FIELDS = [
+  { src: 'ph', key: 'ph', bit: 1 },
+  { src: 'orp', key: 'orp', bit: 2 },
+  { src: 'temp', key: 'temp', bit: 4 },
+];
 
 const MAX_FUTURE_MS = 5 * 60 * 1000;
 const MAX_PAST_MS = 30 * 86400 * 1000; // edge buffer may replay up to 30 days
@@ -16,24 +28,24 @@ function parseTime(ts, now) {
   return t;
 }
 
-function parseSample(s, now) {
+function parseSample(s, fields, now) {
   if (!s || typeof s !== 'object') return null;
   const time = parseTime(s.ts, now);
   if (!time) return null;
-  const out = { time, quality: s.backfill ? QUALITY.BACKFILL : 0 };
+  const out = { time, quality: s.backfill ? BACKFILL : 0 };
   let any = false;
-  for (const m of METRICS) {
-    const v = s[m];
+  for (const f of fields) {
+    const v = s[f.src];
     if (typeof v !== 'number' || !Number.isFinite(v)) {
-      out[m] = null;
+      out[f.key] = null;
       continue;
     }
-    const [lo, hi] = PHYSICAL_RANGE[m];
+    const [lo, hi] = PHYSICAL_RANGE[f.key];
     if (v < lo || v > hi) {
-      out[m] = null;
-      out.quality |= QUALITY[m];
+      out[f.key] = null;
+      out.quality |= f.bit;
     } else {
-      out[m] = v;
+      out[f.key] = v;
       any = true;
     }
   }
@@ -48,21 +60,33 @@ function json(buf) {
   }
 }
 
-/**
- * Telemetry payload: one sample `{ts, do, ph, orp, temp}` or a batch `{samples: [...]}`
- * (edge buffer flush / backfill). `ts` is ISO string or epoch (s or ms), taken at the source.
- * @returns {{samples: object[], dropped: number}}
- */
-export function parseTelemetry(buf, now = Date.now()) {
+function parseSamples(buf, fields, now) {
   const body = json(buf);
   if (body === undefined) return { samples: [], dropped: 1 };
   const list = Array.isArray(body?.samples) ? body.samples : [body];
   const samples = [];
   for (const s of list) {
-    const p = parseSample(s, now);
+    const p = parseSample(s, fields, now);
     if (p) samples.push(p);
   }
   return { samples, dropped: list.length - samples.length };
+}
+
+/**
+ * Pond telemetry (DO probe): one sample `{ts, do, do_pct, temp}` or a batch `{samples: [...]}`
+ * (edge buffer flush / backfill). `ts` is ISO string or epoch (s or ms), taken at the source.
+ * @returns {{samples: {time, quality, do, doPct, temp}[], dropped: number}}
+ */
+export function parseTelemetry(buf, now = Date.now()) {
+  return parseSamples(buf, POND_FIELDS, now);
+}
+
+/**
+ * RAS telemetry (pH + ORP probes of a unit): `{ts, ph, orp, temp}` or `{samples: [...]}`.
+ * @returns {{samples: {time, quality, ph, orp, temp}[], dropped: number}}
+ */
+export function parseRasTelemetry(buf, now = Date.now()) {
+  return parseSamples(buf, RAS_FIELDS, now);
 }
 
 /**

@@ -76,7 +76,7 @@ function yRange(threshold) {
  * @param {HTMLElement} el
  * @param {{metric: string, threshold: object, height?: number, syncKey?: string}} opts
  */
-export function createChart(el, { metric, threshold, height = 150, syncKey = 'pond' }) {
+export function createChart(el, { metric, threshold = {}, height = 150, syncKey = 'pond' }) {
   const info = METRIC_INFO[metric];
   let data = [[], []];
   let plot = null;

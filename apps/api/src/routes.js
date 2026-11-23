@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { pool } from './db.js';
 import { login, logout, requireAuth } from './auth.js';
-import { listPonds, getPond, getReadings, getThresholds } from './ponds.js';
+import { listPonds, getPond, getReadings, getRasReadings, getThresholds } from './ponds.js';
+import { listUnits } from './units.js';
 import { streamHandler } from './stream.js';
 
 export const api = Router();
@@ -33,8 +34,8 @@ api.get('/farms/:id/overview', async (req, res) => {
   } = await pool.query('SELECT id, code, name, gateway_online, gateway_seen_at FROM farms WHERE id = $1', [farmId]);
   if (!farm) return res.status(404).json({ error: 'farm not found' });
 
-  const [{ rows: zones }, ponds, thresholds, { rows: alarmCount }] = await Promise.all([
-    pool.query('SELECT code, name FROM zones WHERE farm_id = $1 ORDER BY sort', [farmId]),
+  const [units, ponds, thresholds, { rows: alarmCount }] = await Promise.all([
+    listUnits(farmId),
     listPonds(farmId),
     getThresholds(farmId),
     pool.query('SELECT count(*)::int AS n FROM alarms WHERE farm_id = $1 AND cleared_at IS NULL', [farmId]),
@@ -48,7 +49,7 @@ api.get('/farms/:id/overview', async (req, res) => {
       gatewayOnline: farm.gateway_online,
       gatewaySeenAt: farm.gateway_seen_at,
     },
-    zones,
+    units,
     thresholds,
     openAlarms: alarmCount[0].n,
     ponds,
@@ -62,7 +63,7 @@ api.get('/ponds/:id', async (req, res) => {
   const { row, json } = found;
 
   const cycleId = row.cycle_id;
-  const [devices, alarms, manual, lab, calibrations, growth, thresholds] = await Promise.all([
+  const [devices, alarms, manual, lab, calibrations, growth, thresholds, [unit]] = await Promise.all([
     pool.query(
       `SELECT d.id, d.code, d.kind, d.name, s.is_on, s.current_a, s.fault, s.updated_at
        FROM devices d LEFT JOIN device_state s ON s.device_id = d.id
@@ -97,6 +98,7 @@ api.get('/ponds/:id', async (req, res) => {
         )
       : { rows: [] },
     getThresholds(row.farm_id),
+    listUnits(row.farm_id, [row.unit_id]),
   ]);
 
   res.json({
@@ -104,6 +106,7 @@ api.get('/ponds/:id', async (req, res) => {
     farmId: row.farm_id,
     thresholds,
     pond: json,
+    unit: unit ?? null,
     growth: growth.rows[0] ?? null,
     devices: devices.rows.map((d) => ({
       id: d.id,
@@ -137,6 +140,39 @@ api.get('/ponds/:id/readings', async (req, res) => {
     from = to - (RANGES[req.query.range] ?? RANGES['24h']) * 1000;
   }
   res.json(await getReadings(pondId, from, to));
+});
+
+// Unit = one RAS: RAS status + probes' calibration + the ponds it serves.
+api.get('/units/:id', async (req, res) => {
+  const unitId = Number(req.params.id);
+  const {
+    rows: [u],
+  } = await pool.query('SELECT farm_id FROM units WHERE id = $1', [unitId]);
+  if (!u) return res.status(404).json({ error: 'unit not found' });
+  const [[unit], ponds, thresholds, calibrations] = await Promise.all([
+    listUnits(u.farm_id, [unitId]),
+    listPonds(u.farm_id, null, unitId),
+    getThresholds(u.farm_id),
+    pool.query(
+      `SELECT DISTINCT ON (metric) metric, calibrated_at, next_due, note FROM calibrations
+       WHERE unit_id = $1 ORDER BY metric, calibrated_at DESC`,
+      [unitId],
+    ),
+  ]);
+  res.json({
+    serverTime: new Date().toISOString(),
+    farmId: u.farm_id,
+    thresholds,
+    unit,
+    ponds,
+    calibrations: calibrations.rows,
+  });
+});
+
+api.get('/units/:id/readings', async (req, res) => {
+  const to = Date.now();
+  const from = to - (RANGES[req.query.range] ?? RANGES['24h']) * 1000;
+  res.json(await getRasReadings(Number(req.params.id), from, to));
 });
 
 api.get('/stream', streamHandler);

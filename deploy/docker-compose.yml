@@ -71,6 +71,8 @@ services:
       VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
       VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
       VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:admin@localhost}
+      # Remote device commands: PLC must answer within this many seconds or the command expires.
+      CMD_TTL_SEC: ${CMD_TTL_SEC:-30}
     depends_on:
       db:
         condition: service_healthy

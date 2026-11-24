@@ -380,7 +380,22 @@ main { max-width: 1440px; margin: 0 auto; padding: 12px 16px 32px; outline: none
 .device .dot.fault { background: var(--crit-bg); }
 .device .name { font-weight: 600; }
 .device .state { color: var(--text-2); font-size: 13px; }
-.device .btn { margin-left: auto; }
+.device { flex-wrap: wrap; }
+.device-body { flex: 1 1 180px; min-width: 0; }
+.device-cmds { margin-left: auto; }
+.device-cmds button { min-width: 64px; min-height: 44px; font-weight: 600; color: var(--text); }
+.device-cmds button:disabled { opacity: .45; cursor: not-allowed; }
+.cmd-line { font-size: 13px; margin-top: 4px; padding: 3px 8px; border-radius: 6px; border: 1px solid; display: inline-block; }
+.cmd-line.busy { background: var(--surface-2); color: var(--text); border-color: var(--border); }
+.cmd-line.ok { background: var(--ok-bg); color: var(--ok-fg); border-color: var(--ok-bd); }
+.cmd-line.warn { background: var(--warn-bg); color: var(--warn-fg); border-color: var(--warn-bd); }
+.cmd-line.bad { background: var(--crit-bg); color: var(--crit-fg); border-color: var(--crit-bd); }
+.cmd-st { font-weight: 600; }
+.cmd-st.ok { color: var(--ok-fg); }
+.cmd-st.bad { color: #d92d20; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .cmd-st.bad { color: #ff8a8d; } }
+:root[data-theme="dark"] .cmd-st.bad { color: #ff8a8d; }
+@media (max-width: 520px) { .device-cmds { width: 100%; margin-left: 24px; } .device-cmds button { flex: 1; } }
 .note { padding: 8px 12px; font-size: 13px; color: var(--text-2); background: var(--surface-2); }
 
 .tabs { display: flex; gap: 2px; overflow-x: auto; padding: 0 8px; border-bottom: 1px solid var(--border); scrollbar-width: none; }

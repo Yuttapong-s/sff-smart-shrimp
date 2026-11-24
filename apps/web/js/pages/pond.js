@@ -9,6 +9,7 @@ import { metricCard } from '../components/metric-card.js';
 import { esc, fmt, fmtInt, fmtDate, fmtDateTime, timeAgo, STATUS_ICON, statusText } from '../format.js';
 import { listOutbox, onOutboxChange } from '../outbox.js';
 import { feedingTable, growthTable, waterTable, labTable, cycleTable, bindDelete, sizePerKg } from '../records-view.js';
+import { controlBlock, deviceListHtml, needsTicking, sendCommand, commandTable } from '../device-control.js';
 
 const RANGES = [
   { key: '24h', label: '24 ชม.' },
@@ -22,6 +23,7 @@ const TABS = [
   ['lab', 'ผล Lab'],
   ['cycles', 'รอบการเลี้ยง'],
   ['alarms', 'แจ้งเตือน'],
+  ['commands', 'คำสั่งอุปกรณ์'],
   ['calibrations', 'Calibrate'],
 ];
 // Tab -> record type for the "+ บันทึก" link (#/manual?type=...).
@@ -85,6 +87,7 @@ export function render(root, { params }) {
 
       <section class="card section" aria-label="อุปกรณ์">
         <div class="section-head"><h2>อุปกรณ์</h2><span class="small muted" data-mode></span></div>
+        <div class="callout warn" data-control-block hidden></div>
         <ul class="devices" data-devices></ul>
         <div class="note" data-control-note></div>
       </section>
@@ -131,6 +134,7 @@ export function render(root, { params }) {
     renderDevices();
     renderTab();
     bindDelete(root.querySelector('[data-tab-body]'), reloadDetail);
+    root.querySelector('[data-devices]').addEventListener('click', onCommandClick);
     setChartData(day);
   }
 
@@ -214,31 +218,54 @@ export function render(root, { params }) {
       ${r.reasons.length ? `<div class="small" style="margin-top:6px">${esc(r.reasons.map((x) => x.text).join(', '))}</div>` : ''}`;
   }
 
+  // ---------- devices / commands ----------
+
+  let tickTimer = null;
+  let sending = false;
+
   function renderDevices() {
     const p = pondJson();
+    const now = serverNow();
     root.querySelector('[data-mode]').textContent = `โหมดควบคุม: ${MODE_TEXT[p.mode] ?? p.mode}`;
-    const list = root.querySelector('[data-devices]');
-    if (!detail.devices.length) {
-      list.innerHTML = '<li class="empty">ยังไม่มีอุปกรณ์ในบ่อนี้</li>';
-    } else {
-      list.innerHTML = detail.devices
-        .map((d) => {
-          const cls = d.fault ? 'fault' : d.isOn ? 'on' : '';
-          const state = d.fault ? 'ขัดข้อง' : d.isOn == null ? 'ไม่ทราบสถานะ' : d.isOn ? 'ทำงาน' : 'หยุด';
-          const amp = typeof d.currentA === 'number' && d.isOn ? ` · ${d.currentA.toFixed(1)} A` : '';
-          return `<li class="device">
-            <span class="dot ${cls}" aria-hidden="true"></span>
-            <div><div class="name">${esc(d.name)}</div>
-            <div class="state">${state}${amp} · ${esc(timeAgo(d.updatedAt, serverNow()))}</div></div>
-            <button type="button" class="btn" disabled>${d.isOn ? 'ปิด' : 'เปิด'}</button>
-          </li>`;
-        })
-        .join('');
-    }
+    const gatewayOnline = store.farm?.gatewayOnline ?? detail.gatewayOnline;
+    const block = controlBlock({ user: store.user, pond: p, gatewayOnline, live: store.conn === 'live', now });
+    const blockEl = root.querySelector('[data-control-block]');
+    blockEl.hidden = !block || block.code === 'role';
+    blockEl.textContent = block ? `🔒 ${block.text}` : '';
+    root.querySelector('[data-devices]').innerHTML = deviceListHtml({
+      devices: detail.devices,
+      commands: detail.commands,
+      block: block ?? (sending ? { code: 'sending' } : null),
+      now,
+    });
     root.querySelector('[data-control-note]').textContent =
-      p.mode === 'local'
-        ? 'HMI อยู่โหมด Local — สั่งงานจากระบบไม่ได้ ต้องสั่งที่หน้าฟาร์ม'
-        : 'สถานะมาจากสัญญาณตอบกลับจริงของ PLC · การสั่งงานจากแอปจะเปิดใช้ในเฟสควบคุมอุปกรณ์ (มีการยืนยันและบันทึกทุกคำสั่ง)';
+      block?.code === 'role'
+        ? block.text
+        : 'สถานะ (จุดสี) มาจากสัญญาณตอบกลับจริงของ PLC · ทุกคำสั่งต้องยืนยัน หมดอายุใน 30 วินาทีถ้า PLC ไม่ตอบ และบันทึกผู้สั่งไว้';
+    // Count down / wait for real state while a command is in flight.
+    clearTimeout(tickTimer);
+    if (needsTicking(detail.devices, detail.commands, now)) tickTimer = setTimeout(renderDevices, 1000);
+  }
+
+  async function onCommandClick(e) {
+    const b = e.target.closest('[data-cmd]');
+    if (!b || b.disabled || sending) return;
+    const device = detail.devices.find((d) => d.id === Number(b.dataset.device));
+    if (!device) return;
+    sending = true;
+    renderDevices();
+    try {
+      const cmd = await sendCommand({ device, action: b.dataset.cmd, pond: pondJson() });
+      if (cmd && !destroyed) detail.commands = [cmd, ...detail.commands.filter((c) => c.id !== cmd.id)];
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      sending = false;
+      if (!destroyed) {
+        renderDevices();
+        if (tab === 'commands') renderTab();
+      }
+    }
   }
 
   /** Outbox items that belong in the current tab of this pond (newest first). */
@@ -279,6 +306,8 @@ export function render(root, { params }) {
       body.innerHTML = add + labTable(rec.lab, pendingFor(['lab'], (d) => d.pondId === pondId || d.unitId === unitId));
     } else if (tab === 'cycles') {
       body.innerHTML = add + cycleTable(rec.cycles, pendingFor(['cycle_start', 'cycle_end'], ofPond));
+    } else if (tab === 'commands') {
+      body.innerHTML = `<div class="note small">ทุกคำสั่งจากแอปและผลตอบกลับของ PLC (ล่าสุด 30 รายการ)</div>${commandTable(detail.commands)}`;
     } else if (tab === 'alarms') {
       body.innerHTML = table(
         ['เวลา', 'ระดับ', 'รายละเอียด', 'สถานะ'],
@@ -355,6 +384,17 @@ export function render(root, { params }) {
       if (detail.unit && ids.includes(detail.unit.id)) renderRas();
       return;
     }
+    if (type === 'commands') {
+      if (ids.pondId === pondId) {
+        lastDeviceFetch = 0; // the PLC state that follows an ack should show at once
+        reloadDetail();
+      }
+      return;
+    }
+    if (type === 'conn' || type === 'farm') {
+      renderDevices();
+      return;
+    }
     if (type === 'records') {
       const r = ids; // {type, unitId, pondId}
       if (r.pondId === pondId || (r.unitId === detail.unit?.id && (r.type === 'water' || r.type === 'lab'))) reloadDetail();
@@ -378,7 +418,8 @@ export function render(root, { params }) {
     renderCards();
     renderRas();
     renderDevices();
-    if (Date.now() - lastDeviceFetch > 15_000) {
+    const waiting = needsTicking(detail.devices, detail.commands, serverNow());
+    if (waiting || Date.now() - lastDeviceFetch > 15_000) {
       lastDeviceFetch = Date.now();
       api
         .pond(pondId)
@@ -407,6 +448,7 @@ export function render(root, { params }) {
   load();
   return () => {
     destroyed = true;
+    clearTimeout(tickTimer);
     offOutbox();
     unsub();
     for (const c of charts) c.chart.destroy();

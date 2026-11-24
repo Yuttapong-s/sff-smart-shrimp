@@ -9,7 +9,7 @@ const POND_SELECT = `
          c.id AS cycle_id, c.cycle_no, c.stocked_at, c.stocked_count,
          COALESCE(d.on_count, 0) AS aer_on, COALESCE(d.total, 0) AS aer_total,
          COALESCE(d.fault_count, 0) AS aer_fault,
-         COALESCE(pc.mode, 'unknown') AS mode
+         COALESCE(pc.mode, 'unknown') AS mode, pc.updated_at AS mode_at
   FROM ponds p
   JOIN units u ON u.id = p.unit_id
   LEFT JOIN pond_latest l ON l.pond_id = p.id
@@ -63,6 +63,7 @@ export function toPondJson(r, thresholds, now = Date.now()) {
     cycle,
     aerators: { on: r.aer_on, total: r.aer_total, fault: r.aer_fault },
     mode: r.mode,
+    modeAt: r.mode_at ? r.mode_at.toISOString() : null,
     status: ev.status,
     metricStatus: ev.metrics,
     reasons: ev.reasons,

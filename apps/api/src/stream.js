@@ -10,7 +10,7 @@ import { listUnits } from './units.js';
 import { getThresholds } from './ponds.js';
 import { alarmStats } from './alarms.js';
 
-const CHANNELS = ['pond_update', 'ras_update', 'farm_update', 'record_update', 'alarm_update'];
+const CHANNELS = ['pond_update', 'ras_update', 'farm_update', 'record_update', 'alarm_update', 'command_update'];
 const FLUSH_MS = 1000;
 
 /** farmId -> Set<res> */
@@ -92,10 +92,11 @@ function schedule() {
 
 function onNotify(msg) {
   // Manual records are rare: relay {farmId, type, unitId, pondId} straight away.
-  if (msg.channel === 'record_update') {
+  // Command status changes too: {farmId, pondId, id, status}.
+  if (msg.channel === 'record_update' || msg.channel === 'command_update') {
     try {
       const r = JSON.parse(msg.payload);
-      broadcast(r.farmId, 'records', r);
+      broadcast(r.farmId, msg.channel === 'record_update' ? 'records' : 'commands', r);
     } catch (err) {
       console.error('[stream] bad record_update payload', err.message);
     }

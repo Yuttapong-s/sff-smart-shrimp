@@ -4,6 +4,8 @@ export class HttpError extends Error {
   constructor(status, body) {
     super(body?.error ?? `HTTP ${status}`);
     this.status = status;
+    this.code = body?.code ?? null;
+    this.body = body;
   }
 }
 
@@ -43,6 +45,8 @@ export const api = {
   pushTest: () => request('/push/test', { method: 'POST' }),
   alarmRules: () => request('/alarm-rules'),
   saveAlarmRules: (farmId, rules) => request('/alarm-rules', { method: 'PUT', body: { farmId, rules } }),
+  command: (body) => request('/commands', { method: 'POST', body }),
+  pondCommands: (pondId) => request(`/ponds/${pondId}/commands`),
 };
 
 /**
@@ -62,6 +66,7 @@ export function openStream(farmId, h) {
   es.addEventListener('farm', (e) => h.onFarm?.(JSON.parse(e.data)));
   es.addEventListener('records', (e) => h.onRecords?.(JSON.parse(e.data)));
   es.addEventListener('alarms', (e) => h.onAlarms?.(JSON.parse(e.data)));
+  es.addEventListener('commands', (e) => h.onCommands?.(JSON.parse(e.data)));
   es.onerror = () => h.onState?.(es.readyState === EventSource.CLOSED ? 'offline' : 'connecting');
   return () => es.close();
 }

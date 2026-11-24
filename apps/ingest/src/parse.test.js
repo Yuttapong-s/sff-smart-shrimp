@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTelemetry, parseRasTelemetry, parseState, parseGateway, BACKFILL } from './parse.js';
+import { parseTelemetry, parseRasTelemetry, parseState, parseGateway, parseCmdAck, BACKFILL } from './parse.js';
 
 const now = Date.parse('2026-01-01T12:00:00Z');
 const b = (o) => Buffer.from(typeof o === 'string' ? o : JSON.stringify(o));
@@ -58,8 +58,27 @@ test('drops garbage, missing/future timestamps and all-null samples', () => {
 test('state and gateway payloads', () => {
   const st = parseState(b({ ts: now, mode: 'remote', devices: [{ code: 'AE1', on: true, current_a: 12.1 }, { bad: 1 }] }), now);
   assert.equal(st.mode, 'remote');
-  assert.deepEqual(st.devices, [{ code: 'AE1', on: true, currentA: 12.1, fault: false }]);
+  assert.deepEqual(st.devices, [{ code: 'AE1', on: true, auto: null, currentA: 12.1, fault: false }]);
   assert.equal(parseState(b({ mode: 'weird' }), now).mode, null);
   assert.equal(parseGateway(b({ online: false }), now).online, false);
   assert.equal(parseGateway(b({}), now), null);
+});
+
+test('command ack', () => {
+  const id = '3F2A1C9E-8B7D-4E6F-9A1B-2C3D4E5F6A7B';
+  const ok = parseCmdAck(b({ id, ok: true, ts: '2026-01-01T11:59:58Z' }), now);
+  assert.equal(ok.id, id.toLowerCase());
+  assert.equal(ok.ok, true);
+  assert.equal(ok.reason, null);
+  assert.equal(ok.time.toISOString(), '2026-01-01T11:59:58.000Z');
+  assert.equal(parseCmdAck(b({ id, ok: false, reason: 'interlock', message: 'DO low' }), now).reason, 'interlock');
+  assert.equal(parseCmdAck(b({ id, ok: false }), now).reason, 'plc_error');
+  assert.equal(parseCmdAck(b({ id: 'x', ok: true }), now), null);
+  assert.equal(parseCmdAck(b({ id }), now), null);
+});
+
+test('state carries auto/manual per device', () => {
+  const st = parseState(b({ mode: 'remote', devices: [{ code: 'AE1', on: true, auto: false }, { code: 'AE2', on: false }] }), now);
+  assert.equal(st.devices[0].auto, false);
+  assert.equal(st.devices[1].auto, null);
 });

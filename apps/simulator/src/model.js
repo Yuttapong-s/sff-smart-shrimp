@@ -21,6 +21,8 @@ export const POND_SCENARIOS = {
   'U08-P01': 'marginal_do',
   'U10-P04': 'offline', // DO probe / RTU not reporting
   'U12-P02': 'do_pct_fault', // DO % missing (probe firmware)
+  'U01-P04': 'local_mode', // HMI switched to Local: remote commands refused
+  'U02-P04': 'no_ack', // gateway drops commands: they expire in the app
 };
 export const RAS_SCENARIOS = {
   U03: 'ras_high_ph', // pH drifting up (warn -> crit in the afternoon)
@@ -49,6 +51,8 @@ export function makePond(code, seed, unit) {
     unit,
     scenario: POND_SCENARIOS[code] ?? 'normal',
     rand,
+    overrides: new Map(), // device code -> forced on/off (manual) until an 'auto' command
+    lastDo: null,
     doMean: 5.6 + (rand() - 0.5) * 0.8,
     doAmp: 1.4 + rand() * 0.6,
     tempOffset: (rand() - 0.5) * 0.4, // ponds sit close to their RAS temperature
@@ -111,16 +115,52 @@ export function samplePond(p, ts) {
   };
 }
 
-/** Aerators run when DO is low or at night (18:00-08:00). */
+// PLC-side safety (the cloud never decides this): below INTERLOCK_DO an aerator cannot be
+// stopped remotely and a manual "off" is overridden back on.
+export const INTERLOCK_DO = 3.5;
+
+/**
+ * Auto logic: aerators run when DO is low or at night (18:00-08:00). A remote on/off command
+ * sets a manual override that holds until an 'auto' command; the interlock beats the override.
+ */
 export function aeratorState(p, s, ts) {
   const hour = (new Date(ts).getUTCHours() + 7) % 24;
   const night = hour >= 18 || hour < 8;
   const need = s.do < 5 || night;
   const second = need && (s.do < 4.5 || night);
+  p.lastDo = s.do;
   return [
-    { code: 'AE1', on: need, current_a: need ? round(11.5 + p.rand(), 1) : 0, fault: false },
-    { code: 'AE2', on: second, current_a: second ? round(11.8 + p.rand(), 1) : 0, fault: false },
-  ];
+    ['AE1', need, 11.5],
+    ['AE2', second, 11.8],
+  ].map(([code, autoOn, amps]) => {
+    let on = autoOn;
+    let auto = true;
+    if (p.overrides.has(code)) {
+      on = p.overrides.get(code);
+      auto = false;
+      if (!on && s.do < INTERLOCK_DO) on = true;
+    }
+    return { code, on, auto, current_a: on ? round(amps + p.rand(), 1) : 0, fault: false };
+  });
+}
+
+/**
+ * PLC handling of a cloud command. Returns the ack body, or null to stay silent (no_ack scenario).
+ * @param {{id: string, device: string, action: string, expires_at: string}} cmd
+ */
+export function applyCommand(p, cmd, now = Date.now()) {
+  if (p.scenario === 'no_ack') return null;
+  const ack = (ok, reason, message) => ({ id: cmd.id, ok, ...(reason ? { reason } : {}), ...(message ? { message } : {}), ts: new Date(now).toISOString() });
+  if (!(Date.parse(cmd.expires_at) > now)) return ack(false, 'expired');
+  if (p.scenario === 'local_mode') return ack(false, 'local_mode');
+  if (!['AE1', 'AE2'].includes(cmd.device)) return ack(false, 'unknown_device');
+  if (cmd.action === 'off' && p.lastDo != null && p.lastDo < INTERLOCK_DO) {
+    return ack(false, 'interlock', `DO ${p.lastDo} mg/L ต่ำกว่า ${INTERLOCK_DO}`);
+  }
+  if (cmd.action === 'auto') p.overrides.delete(cmd.device);
+  else if (cmd.action === 'on' || cmd.action === 'off') p.overrides.set(cmd.device, cmd.action === 'on');
+  else return ack(false, 'plc_error', `unknown action ${cmd.action}`);
+  return ack(true);
 }
 
 function round(v, d) {

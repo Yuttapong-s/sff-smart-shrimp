@@ -103,6 +103,7 @@ export function parseState(buf, now = Date.now()) {
     .map((d) => ({
       code: d.code,
       on: typeof d.on === 'boolean' ? d.on : null,
+      auto: typeof d.auto === 'boolean' ? d.auto : null,
       currentA: typeof d.current_a === 'number' && Number.isFinite(d.current_a) ? d.current_a : null,
       fault: d.fault === true,
     }));
@@ -114,4 +115,20 @@ export function parseGateway(buf, now = Date.now()) {
   const body = json(buf);
   if (!body || typeof body.online !== 'boolean') return null;
   return { online: body.online, time: parseTime(body.ts, now) ?? new Date(now) };
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Command result from the PLC: `{id, ok, reason?, message?, ts}` */
+export function parseCmdAck(buf, now = Date.now()) {
+  const body = json(buf);
+  if (!body || typeof body.id !== 'string' || !UUID_RE.test(body.id) || typeof body.ok !== 'boolean') return null;
+  const str = (v, n) => (typeof v === 'string' && v ? v.slice(0, n) : null);
+  return {
+    id: body.id.toLowerCase(),
+    ok: body.ok,
+    reason: body.ok ? null : str(body.reason, 40) ?? 'plc_error',
+    message: str(body.message, 200),
+    time: parseTime(body.ts, now) ?? new Date(now),
+  };
 }

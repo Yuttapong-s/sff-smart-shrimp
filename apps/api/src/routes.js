@@ -5,6 +5,7 @@ import { listPonds, getPond, getReadings, getRasReadings, getThresholds } from '
 import { listUnits } from './units.js';
 import { streamHandler } from './stream.js';
 import { alarms, alarmStats } from './alarms.js';
+import { control, pondCommands } from './control.js';
 import { records, waterTests, waterLatest, labTests, feedings, growthSamples, cycleHistory } from './records.js';
 
 export const api = Router();
@@ -23,6 +24,7 @@ api.get('/me', (req, res) => res.json(req.user));
 
 api.use(records);
 api.use(alarms);
+api.use(control);
 
 api.get('/farms', async (_req, res) => {
   const { rows } = await pool.query(
@@ -69,9 +71,9 @@ api.get('/ponds/:id', async (req, res) => {
   const { row, json } = found;
 
   const cycleId = row.cycle_id;
-  const [devices, alarms, calibrations, thresholds, [unit], water, lab, feed, growth, cycles] = await Promise.all([
+  const [devices, alarms, calibrations, thresholds, [unit], water, lab, feed, growth, cycles, commands, farm] = await Promise.all([
     pool.query(
-      `SELECT d.id, d.code, d.kind, d.name, s.is_on, s.current_a, s.fault, s.updated_at
+      `SELECT d.id, d.code, d.kind, d.name, s.is_on, s.auto, s.current_a, s.fault, s.updated_at
        FROM devices d LEFT JOIN device_state s ON s.device_id = d.id
        WHERE d.pond_id = $1 ORDER BY d.kind, d.code`,
       [pondId],
@@ -94,6 +96,8 @@ api.get('/ponds/:id', async (req, res) => {
     feedings(cycleId),
     growthSamples(cycleId),
     cycleHistory(pondId),
+    pondCommands(pondId),
+    pool.query('SELECT gateway_online FROM farms WHERE id = $1', [row.farm_id]),
   ]);
 
   res.json({
@@ -109,11 +113,14 @@ api.get('/ponds/:id', async (req, res) => {
       kind: d.kind,
       name: d.name,
       isOn: d.is_on,
+      auto: d.auto,
       currentA: d.current_a,
       fault: d.fault,
       updatedAt: d.updated_at,
     })),
     alarms: alarms.rows,
+    commands,
+    gatewayOnline: farm.rows[0]?.gateway_online ?? null,
     calibrations: calibrations.rows,
     records: { water, lab, feedings: feed, growth, cycles },
   });

@@ -8,7 +8,7 @@ PWA สำหรับติดตามคุณภาพน้ำและค�
             siren, Local/Remote                                                 ▼
 VPS (Docker): Caddy → api (Express + SSE) │ ingest │ EMQX │ PostgreSQL + TimescaleDB
                                                   │
-                                       Web Push / LINE / SMS → PWA
+                                       Web Push → PWA
 ```
 
 ## ผังฟาร์ม
@@ -67,15 +67,42 @@ Simulator ส่งข้อมูลย้อนหลัง 48 ชม. แล�
 |---|---|---|
 | `sff/{farm}/{pond}/telemetry` | 1 | หัววัด DO ในบ่อ: `{"ts":"2026-01-01T10:00:00+07:00","do":5.2,"do_pct":71,"temp":29.1}` หรือ batch `{"samples":[{...,"backfill":true}]}` |
 | `sff/{farm}/{unit}/ras/telemetry` | 1 | หัววัด RAS ของ Unit: `{"ts":...,"ph":7.9,"orp":250,"temp":29.0}` หรือ batch แบบเดียวกัน |
-| `sff/{farm}/{pond}/state` | 1, retain | `{"ts":...,"mode":"remote","devices":[{"code":"AE1","on":true,"current_a":12.1,"fault":false}]}` |
+| `sff/{farm}/{pond}/state` | 1, retain | `{"ts":...,"mode":"remote","devices":[{"code":"AE1","on":true,"auto":true,"current_a":12.1,"fault":false}]}` |
 | `sff/{farm}/gateway/status` | 1, retain, **LWT** | `{"online":true}` (LWT: `{"online":false}`) |
-| `sff/{farm}/{pond}/cmd` | 1, **ห้าม retain** | (เฟสควบคุมอุปกรณ์) `{"id":"uuid","device":"AE1","action":"on","expires_at":...}` |
-| `sff/{farm}/{pond}/cmd/ack` | 1 | (เฟสควบคุมอุปกรณ์) |
+| `sff/{farm}/{pond}/cmd` | 1, **ห้าม retain** | คำสั่งจากระบบ: `{"id":"uuid","device":"AE1","action":"on\|off\|auto","ts":...,"expires_at":...,"ttl_sec":30,"by":"ชื่อผู้สั่ง"}` |
+| `sff/{farm}/{pond}/cmd/ack` | 1 | ผลจาก PLC: `{"id":"uuid","ok":true,"ts":...}` หรือ `{"id":...,"ok":false,"reason":"interlock","message":"..."}` |
 
 - `{pond}` คือรหัสบ่อ เช่น `U01-P01` และ `{unit}` คือรหัส Unit เช่น `U01`
 - `ts` ต้องเป็นเวลาที่วัดจริงจากต้นทาง (ตั้ง NTP ที่ IPC/PLC) — ส่งซ้ำได้ ระบบตัดข้อมูลซ้ำด้วย `(pond_id, time)` และ `(unit_id, time)`
 - Gateway ควรเก็บข้อมูลไว้ตอนเน็ตหลุดแล้วส่งย้อนหลังเป็น batch พร้อม `"backfill": true` (รับย้อนหลังได้ 30 วัน)
 - `device_state` คือสถานะจริงจาก feedback ของ PLC (aux contact / กระแสมอเตอร์) ไม่ใช่ "สั่งแล้ว"
+- `auto` ใน state: `true` = ทำงานตามโปรแกรมอัตโนมัติของ PLC, `false` = ค้างตามคำสั่งเอง (Manual)
+- ส่ง `state` ทุกครั้งที่มีการเปลี่ยนแปลง และอย่างน้อยทุก 60 วินาที ถ้าเกิน 2 นาที แอปจะไม่ยอมส่งคำสั่ง
+
+## สั่งงานอุปกรณ์ (เปิด / ปิด / อัตโนมัติ)
+
+ปุ่มอยู่ที่หน้าบ่อ ส่วน "อุปกรณ์" สั่งได้เฉพาะ **technician, manager, owner** ส่วน worker ดูได้อย่างเดียว
+
+```
+แอป → api (ตรวจเงื่อนไข + บันทึก commands) → MQTT cmd → PLC → cmd/ack → ingest → แอป (SSE)
+                                                          └→ state (สถานะจริง) → แอป
+```
+
+- **ก่อนส่ง api ตรวจ:** Gateway ออนไลน์, HMI อยู่โหมด Remote, สถานะจาก PLC ไม่เก่ากว่า 2 นาที, ไม่มีคำสั่งค้างของอุปกรณ์เดียวกัน
+- **ยืนยันทุกครั้ง:** ทุกคำสั่งต้องกดยืนยัน ถ้า DO ของบ่ออยู่ระดับเตือนหรือวิกฤต การปิดเครื่องตีน้ำต้องยืนยันอีกขั้น และบันทึกไว้ว่ายืนยันตอน DO ต่ำ
+- **ผลที่แสดง:** "รอ PLC ตอบ (นับถอยหลัง)" → "PLC รับคำสั่งแล้ว รอสถานะจริง" → "สำเร็จ ยืนยันจากสถานะจริงแล้ว" ถ้า PLC รับแล้วแต่สถานะไม่เปลี่ยนใน 20 วินาที จะเตือนให้ตรวจหน้างาน
+- **หมดอายุ:** PLC ไม่ตอบภายใน `CMD_TTL_SEC` (30 วินาที) คำสั่งเป็น "หมดเวลา" broker ทิ้งข้อความที่ค้าง (MQTT message expiry) และ PLC ต้องไม่ทำคำสั่งที่เลย `expires_at`
+- **กดซ้ำ:** แอปส่ง `id` ของคำสั่งมาเอง ถ้ากดซ้ำหรือส่งซ้ำตอนเน็ตกระตุกจะไม่เกิดคำสั่งที่สอง และไม่มีการเก็บคำสั่งไว้ส่งทีหลังตอนออฟไลน์
+- **บันทึก:** ทุกคำสั่งอยู่ในตาราง `commands` (ผู้สั่ง, ค่า DO และสถานะตอนสั่ง, ผล, เหตุผล) และ `audit_log` ดูได้ที่แท็บ "คำสั่งอุปกรณ์" ของหน้าบ่อ
+
+**สิ่งที่ PLC / gateway ต้องทำ** (ระบบ cloud ไม่ใช่ตัวป้องกันความปลอดภัย)
+1. ปฏิเสธคำสั่งเมื่อ HMI อยู่ Local (`reason: "local_mode"`) หรือเลย `expires_at` (`"expired"`) ต้องตั้ง NTP ให้ตรง
+2. มี interlock เอง เช่น ไม่ยอมปิดเครื่องตีน้ำเมื่อ DO ต่ำ (`"interlock"`) และเปิดคืนเองถ้า DO ตกระหว่างค้าง Manual
+3. ตอบ `cmd/ack` ทันทีที่รับคำสั่ง แล้วส่ง `state` ใหม่เมื่ออุปกรณ์เปลี่ยนจริง
+4. subscribe `cmd` แบบไม่เก็บ session (clean start) เพื่อไม่ให้ได้คำสั่งเก่าตอนต่อกลับ
+5. reason อื่นที่แอปแปลเป็นภาษาไทยได้: `device_fault`, `unknown_device`, `plc_error`
+
+simulator จำลอง PLC: `U01-P04` อยู่โหมด Local, `U02-P04` ไม่ตอบคำสั่ง (ดูการหมดเวลา), ปิดเครื่องตีน้ำเมื่อ DO < 3.5 จะถูก interlock
 
 ## บันทึกข้อมูลหน้างาน (ใช้ได้ตอนไม่มีสัญญาณ)
 
@@ -144,5 +171,5 @@ VAPID key สร้างเองครั้งแรกแล้วเก็�
 - [x] โครงสร้าง Unit/RAS: การ์ด Unit แสดงค่า RAS, หน้ารายละเอียด RAS, หัววัด DO ในบ่อ
 - [x] บันทึกหน้างานแบบ offline-first: ให้อาหาร, สุ่มน้ำหนัก, ค่าน้ำชุดทดสอบ (RAS), ผล Lab, รอบการเลี้ยง
 - [x] Alert engine: เกณฑ์ + เวลายืนยัน, Web Push + เสียงในแอป, รับทราบ + ส่งซ้ำ/ส่งต่อ (ไม่ใช้ LINE / SMS)
-- [ ] สั่งงานอุปกรณ์: cmd → ack → state, หมดอายุคำสั่ง, Local/Remote, audit log
+- [x] สั่งงานอุปกรณ์: เปิด / ปิด / อัตโนมัติ, cmd → ack → สถานะจริง, หมดอายุคำสั่ง, Local/Remote, ยืนยันตอน DO ต่ำ, audit log
 - [ ] Edge agent บน IPC: Modbus/OPC UA → MQTT, buffer, siren (รอข้อมูลรุ่น PLC)

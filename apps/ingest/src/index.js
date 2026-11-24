@@ -6,7 +6,7 @@
 import mqtt from 'mqtt';
 import pg from 'pg';
 import { INGEST_SUBSCRIPTIONS, parseTopic } from '@sff/shared';
-import { parseTelemetry, parseRasTelemetry, parseState, parseGateway } from './parse.js';
+import { parseTelemetry, parseRasTelemetry, parseState, parseGateway, parseCmdAck } from './parse.js';
 
 const env = process.env;
 const MQTT_URL = env.MQTT_URL ?? 'mqtt://localhost:1883';
@@ -201,11 +201,11 @@ async function handleState(pond, msg) {
       const deviceId = deviceByKey.get(`${pond.id}/${d.code}`);
       if (!deviceId) continue;
       await client.query(
-        `INSERT INTO device_state (device_id, is_on, current_a, fault, updated_at) VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (device_id) DO UPDATE SET is_on = EXCLUDED.is_on, current_a = EXCLUDED.current_a,
-           fault = EXCLUDED.fault, updated_at = EXCLUDED.updated_at
+        `INSERT INTO device_state (device_id, is_on, auto, current_a, fault, updated_at) VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (device_id) DO UPDATE SET is_on = EXCLUDED.is_on, auto = EXCLUDED.auto,
+           current_a = EXCLUDED.current_a, fault = EXCLUDED.fault, updated_at = EXCLUDED.updated_at
          WHERE device_state.updated_at <= EXCLUDED.updated_at`,
-        [deviceId, d.on, d.currentA, d.fault, st.time],
+        [deviceId, d.on, d.auto, d.currentA, d.fault, st.time],
       );
     }
     await client.query('SELECT pg_notify($1, $2)', ['pond_update', `${pond.farmId}:${pond.id}`]);
@@ -215,6 +215,34 @@ async function handleState(pond, msg) {
     console.error('[ingest] state write failed', err.message);
   } finally {
     client.release();
+  }
+}
+
+/**
+ * PLC result for a command. A late ack (after the api marked it expired) still wins: the PLC is
+ * the truth about what it did. An ack can also beat the api's own "sent" update (PUBACK race).
+ */
+async function handleCmdAck(pond, msg) {
+  const ack = parseCmdAck(msg);
+  if (!ack) return void stats.dropped++;
+  try {
+    const { rows } = await pool.query(
+      `UPDATE commands SET
+         status = CASE WHEN $3 THEN 'acked' ELSE 'rejected' END,
+         reason = $4, ack_at = $5,
+         ack_detail = jsonb_build_object('message', $6::text, 'late', status = 'expired', 'receivedAt', now())
+       WHERE id = $1 AND pond_id = $2 AND status IN ('pending', 'sent', 'expired')
+       RETURNING id, status`,
+      [ack.id, pond.id, ack.ok, ack.reason, ack.time, ack.message],
+    );
+    if (!rows.length) return void stats.unknown++;
+    await pool.query('SELECT pg_notify($1, $2)', [
+      'command_update',
+      JSON.stringify({ farmId: pond.farmId, pondId: pond.id, id: ack.id, status: rows[0].status }),
+    ]);
+    console.log(`[ingest] cmd ${ack.id} ${rows[0].status}${ack.reason ? ` (${ack.reason})` : ''}`);
+  } catch (err) {
+    console.error('[ingest] cmd ack write failed', err.message);
   }
 }
 
@@ -247,11 +275,12 @@ async function handleMessage(topic, msg) {
     if (!unit) return void stats.unknown++;
     return enqueue(rasSink, unit, parseRasTelemetry(msg));
   }
-  if (t.kind !== 'telemetry' && t.kind !== 'state') return; // cmdAck / alarm: later phases
+  if (t.kind !== 'telemetry' && t.kind !== 'state' && t.kind !== 'cmdAck') return; // edge alarm: later phase
 
   const pond = await lookup(() => pondByKey, t.farm, t.pond);
   if (!pond) return void stats.unknown++;
   if (t.kind === 'state') return handleState(pond, msg);
+  if (t.kind === 'cmdAck') return handleCmdAck(pond, msg);
   enqueue(pondSink, pond, parseTelemetry(msg));
 }
 

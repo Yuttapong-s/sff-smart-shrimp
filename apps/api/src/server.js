@@ -9,6 +9,7 @@ import { seedAdmin, seedDemoFarm } from './seed.js';
 import { authenticate } from './auth.js';
 import { api } from './routes.js';
 import { startListener } from './stream.js';
+import { startControl } from './control.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -21,6 +22,7 @@ await migrate(pool);
 await seedAdmin(pool);
 if (config.seed.enabled) await seedDemoFarm(pool);
 await startListener();
+startControl();
 
 const app = express();
 app.disable('x-powered-by');

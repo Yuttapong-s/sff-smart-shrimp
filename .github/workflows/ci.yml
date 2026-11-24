@@ -81,6 +81,21 @@ jobs:
           curl -sf -b c.txt localhost:8080/api/alarms | jq -e '.stats.alerterOk == true'
           curl -sf -b c.txt -X POST localhost:8080/api/alarms/$ID/ack | jq -e '.ok'
           curl -sf -b c.txt localhost:8080/api/push/key | jq -e '.publicKey | length > 80'
+          # Device control: stop aerator 1 of pond 1; the simulated PLC acks and reports the real state.
+          DEV=$(curl -sf -b c.txt localhost:8080/api/ponds/1 | jq -r '.devices[0].id')
+          CMD='{"id":"5b8e0c1a-2f4d-4a6b-9c3e-1d2f3a4b5c6d","deviceId":'$DEV',"action":"off"}'
+          curl -sf -b c.txt -H 'Content-Type: application/json' -d "$CMD" localhost:8080/api/commands | jq -e '.status == "sent" or .status == "acked"'
+          for i in $(seq 1 15); do
+            ST=$(curl -sf -b c.txt localhost:8080/api/ponds/1/commands | jq -r '.[0].status')
+            [ "$ST" = acked ] && break
+            sleep 1
+          done
+          test "$ST" = acked
+          sleep 3
+          curl -sf -b c.txt localhost:8080/api/ponds/1 | jq -e '.devices[0].isOn == false and .devices[0].auto == false'
+          # Re-sending the same id is idempotent: no second command is created.
+          curl -sf -b c.txt -H 'Content-Type: application/json' -d "$CMD" localhost:8080/api/commands | jq -e '.status == "acked"'
+          curl -sf -b c.txt localhost:8080/api/ponds/1/commands | jq -e 'length == 1'
           # A RAS serves at most 10 ponds: the 11th insert must fail.
           ! docker compose --env-file .env exec -T db psql -U sff -d sff -v ON_ERROR_STOP=1 -c "insert into ponds (farm_id, unit_id, code) select 1, 1, 'X' || g from generate_series(1, 7) g"
           test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/api/farms)" = 401

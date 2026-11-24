@@ -125,6 +125,8 @@ export async function loadFarm(farmId) {
     },
     // A manual record was saved / deleted somewhere: {type, unitId, pondId}
     onRecords: (r) => emit('records', r),
+    // A device command changed status: {pondId, id, status}
+    onCommands: (c) => emit('commands', c),
   });
 
   clearInterval(staleTimer);

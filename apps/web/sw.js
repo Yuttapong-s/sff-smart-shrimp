@@ -2,8 +2,8 @@
 // so the overview still shows the latest known state when signal drops at the ponds.
 
 // Bump VERSION when the shell or the API response shape changes
-// (v2: units + RAS, v3: manual records, v4: alarms + push).
-const VERSION = 'v4';
+// (v2: units + RAS, v3: manual records, v4: alarms + push, v5: device control).
+const VERSION = 'v5';
 const SHELL = `sff-shell-${VERSION}`;
 const API = `sff-api-${VERSION}`;
 
@@ -18,6 +18,7 @@ const SHELL_FILES = [
   '/js/format.js',
   '/js/outbox.js',
   '/js/records-view.js',
+  '/js/device-control.js',
   '/js/push.js',
   '/js/alarm-sound.js',
   '/js/pages/settings.js',
@@ -34,6 +35,7 @@ const SHELL_FILES = [
   '/shared/topics.js',
   '/shared/ponds.js',
   '/shared/records.js',
+  '/shared/control.js',
   '/vendor/uplot/uPlot.esm.js',
   '/vendor/uplot/uPlot.min.css',
   '/manifest.webmanifest',

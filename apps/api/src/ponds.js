@@ -26,6 +26,10 @@ const POND_SELECT = `
 
 // Thresholds are read often (every SSE batch) and change rarely: cache briefly.
 const thresholdCache = new Map();
+export function clearThresholdCache(farmId) {
+  thresholdCache.delete(farmId);
+}
+
 export async function getThresholds(farmId) {
   const hit = thresholdCache.get(farmId);
   if (hit && Date.now() - hit.at < 30_000) return hit.value;

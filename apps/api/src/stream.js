@@ -7,8 +7,10 @@ import { config } from './config.js';
 import { pool } from './db.js';
 import { listPonds } from './ponds.js';
 import { listUnits } from './units.js';
+import { getThresholds } from './ponds.js';
+import { alarmStats } from './alarms.js';
 
-const CHANNELS = ['pond_update', 'ras_update', 'farm_update', 'record_update'];
+const CHANNELS = ['pond_update', 'ras_update', 'farm_update', 'record_update', 'alarm_update'];
 const FLUSH_MS = 1000;
 
 /** farmId -> Set<res> */
@@ -17,6 +19,7 @@ const clients = new Map();
 const pending = new Map();
 const pendingUnits = new Map();
 const pendingFarm = new Set();
+const pendingAlarms = new Set();
 let flushTimer = null;
 
 function send(res, event, data) {
@@ -35,6 +38,8 @@ async function flush() {
   pendingUnits.clear();
   const farms = [...pendingFarm];
   pendingFarm.clear();
+  const alarmFarms = [...pendingAlarms];
+  pendingAlarms.clear();
 
   for (const [farmId, ids] of batch) {
     if (!clients.get(farmId)?.size) continue;
@@ -60,9 +65,23 @@ async function flush() {
       const {
         rows: [f],
       } = await pool.query('SELECT gateway_online, gateway_seen_at FROM farms WHERE id = $1', [farmId]);
-      if (f) broadcast(farmId, 'farm', { gatewayOnline: f.gateway_online, gatewaySeenAt: f.gateway_seen_at });
+      if (f) {
+        broadcast(farmId, 'farm', {
+          gatewayOnline: f.gateway_online,
+          gatewaySeenAt: f.gateway_seen_at,
+          thresholds: await getThresholds(farmId),
+        });
+      }
     } catch (err) {
       console.error('[stream] farm flush failed', err.message);
+    }
+  }
+  for (const farmId of alarmFarms) {
+    if (!clients.get(farmId)?.size) continue;
+    try {
+      broadcast(farmId, 'alarms', await alarmStats(farmId));
+    } catch (err) {
+      console.error('[stream] alarm flush failed', err.message);
     }
   }
 }
@@ -87,6 +106,8 @@ function onNotify(msg) {
   const farmId = Number(farmPart);
   if (msg.channel === 'farm_update') {
     pendingFarm.add(farmId);
+  } else if (msg.channel === 'alarm_update') {
+    pendingAlarms.add(farmId);
   } else {
     const target = msg.channel === 'ras_update' ? pendingUnits : pending;
     if (!target.has(farmId)) target.set(farmId, new Set());

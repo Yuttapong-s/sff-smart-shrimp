@@ -32,9 +32,9 @@ export async function seedDemoFarm(pool) {
 
     for (const [metric, t] of Object.entries(DEFAULT_THRESHOLDS)) {
       await client.query(
-        `INSERT INTO alarm_rules (farm_id, metric, crit_low, warn_low, warn_high, crit_high)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [farm.id, metric, t.critLow, t.warnLow, t.warnHigh, t.critHigh],
+        `INSERT INTO alarm_rules (farm_id, metric, crit_low, warn_low, warn_high, crit_high, hold_seconds)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [farm.id, metric, t.critLow, t.warnLow, t.warnHigh, t.critHigh, metric === 'do' ? 120 : 300],
       );
     }
 

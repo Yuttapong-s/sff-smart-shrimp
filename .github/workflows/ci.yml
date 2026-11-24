@@ -44,7 +44,7 @@ jobs:
           SIM_INTERVAL_SEC=2
           SIM_BACKFILL_HOURS=1
           EOF
-      - run: docker compose --env-file .env --profile sim up -d --build --wait --wait-timeout 300 db emqx api ingest caddy
+      - run: docker compose --env-file .env --profile sim up -d --build --wait --wait-timeout 300 db emqx api ingest alerter caddy
       - run: docker compose --env-file .env --profile sim up -d simulator
       - name: Wait for live data
         run: |
@@ -69,6 +69,18 @@ jobs:
           curl -sf -b c.txt -H 'Content-Type: application/json' -d "$REC" localhost:8080/api/records | jq -e '[.results[].status] == ["ok","rejected"]'
           curl -sf -b c.txt -H 'Content-Type: application/json' -d "$REC" localhost:8080/api/records | jq -e '.results[0].status == "duplicate"'
           curl -sf -b c.txt localhost:8080/api/units/1 | jq -e '.records.water[0].values.alkalinity == 150'
+          # Alert engine: an out-of-range test-kit value opens a water alarm; any role can acknowledge it.
+          WATER='{"items":[{"type":"water","clientId":"7d0f6b1e-3a52-4c1e-9f0a-0c8b6f2d4e13","data":{"unitId":2,"time":"'$(date -u +%FT%TZ)'","values":{"no2":2.5}}}]}'
+          curl -sf -b c.txt -H 'Content-Type: application/json' -d "$WATER" localhost:8080/api/records | jq -e '.results[0].status == "ok"'
+          for i in $(seq 1 30); do
+            ID=$(curl -sf -b c.txt localhost:8080/api/alarms | jq -r '[.alarms[] | select(.kind == "water")][0].id // empty')
+            [ -n "$ID" ] && break
+            sleep 2
+          done
+          test -n "$ID"
+          curl -sf -b c.txt localhost:8080/api/alarms | jq -e '.stats.alerterOk == true'
+          curl -sf -b c.txt -X POST localhost:8080/api/alarms/$ID/ack | jq -e '.ok'
+          curl -sf -b c.txt localhost:8080/api/push/key | jq -e '.publicKey | length > 80'
           # A RAS serves at most 10 ponds: the 11th insert must fail.
           ! docker compose --env-file .env exec -T db psql -U sff -d sff -v ON_ERROR_STOP=1 -c "insert into ponds (farm_id, unit_id, code) select 1, 1, 'X' || g from generate_series(1, 7) g"
           test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/api/farms)" = 401

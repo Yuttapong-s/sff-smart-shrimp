@@ -114,3 +114,13 @@ test('thresholdsFromRules overrides defaults', () => {
   assert.equal(t.do.critLow, 2.5);
   assert.equal(t.ph.critLow, 7.0);
 });
+
+test('validateRule', async () => {
+  const { validateRule } = await import('./thresholds.js');
+  assert.deepEqual(validateRule('do', { critLow: 3, warnLow: 4, warnHigh: null, critHigh: null, holdSeconds: 120 }), []);
+  assert.ok(validateRule('do', { critLow: 4, warnLow: 3, holdSeconds: 120 }).length, 'order');
+  assert.ok(validateRule('ph', { warnLow: 7.5, critHigh: 15, holdSeconds: 60 }).length, 'range');
+  assert.ok(validateRule('temp', { warnLow: 26, holdSeconds: 9999 }).length, 'hold');
+  assert.ok(validateRule('temp', { holdSeconds: 60 }).length, 'no limits');
+  assert.ok(validateRule('nope', {}).length);
+});

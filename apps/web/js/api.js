@@ -34,6 +34,15 @@ export const api = {
   unit: (id) => request(`/units/${id}`),
   unitReadings: (id, range) => request(`/units/${id}/readings?range=${encodeURIComponent(range)}`),
   deleteRecord: (type, clientId) => request(`/records/${type}/${clientId}`, { method: 'DELETE' }),
+  alarms: (state = 'open') => request(`/alarms?state=${state}`),
+  ackAlarm: (id) => request(`/alarms/${id}/ack`, { method: 'POST', body: { via: 'app' } }),
+  pushKey: () => request('/push/key'),
+  pushStatus: () => request('/push/status'),
+  pushSubscribe: (subscription) => request('/push/subscribe', { method: 'POST', body: { subscription } }),
+  pushUnsubscribe: (endpoint) => request('/push/unsubscribe', { method: 'POST', body: { endpoint } }),
+  pushTest: () => request('/push/test', { method: 'POST' }),
+  alarmRules: () => request('/alarm-rules'),
+  saveAlarmRules: (farmId, rules) => request('/alarm-rules', { method: 'PUT', body: { farmId, rules } }),
 };
 
 /**
@@ -52,6 +61,7 @@ export function openStream(farmId, h) {
   es.addEventListener('units', (e) => h.onUnits?.(JSON.parse(e.data)));
   es.addEventListener('farm', (e) => h.onFarm?.(JSON.parse(e.data)));
   es.addEventListener('records', (e) => h.onRecords?.(JSON.parse(e.data)));
+  es.addEventListener('alarms', (e) => h.onAlarms?.(JSON.parse(e.data)));
   es.onerror = () => h.onState?.(es.readyState === EventSource.CLOSED ? 'offline' : 'connecting');
   return () => es.close();
 }

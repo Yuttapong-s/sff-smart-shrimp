@@ -4,9 +4,12 @@
 //   #/unit/:id      unit (RAS) detail
 //   #/alarms        alarm list
 //   #/manual        manual records (water test, feeding, growth, lab, crop cycle) + outbox
+//   #/settings      Web Push on this device, alarm sound, alarm thresholds
 
 import { api, HttpError } from './api.js';
 import { setOutboxUser, onOutboxChange, listOutbox } from './outbox.js';
+import { relinkPush, unlinkPush } from './push.js';
+import { updateAlarmSound, stopAlarmSound } from './alarm-sound.js';
 import { store, subscribe, loadFarm, stopFarm } from './store.js';
 import { timeAgo } from './format.js';
 import { parseHash, saveScroll } from './router.js';
@@ -16,6 +19,7 @@ import * as unit from './pages/unit.js';
 import * as alarms from './pages/alarms.js';
 import * as manual from './pages/manual.js';
 import * as login from './pages/login.js';
+import * as settings from './pages/settings.js';
 
 const view = document.getElementById('view');
 const routes = [
@@ -24,6 +28,7 @@ const routes = [
   { re: /^\/unit\/(\d+)$/, page: unit, nav: 'overview' },
   { re: /^\/alarms$/, page: alarms, nav: 'alarms' },
   { re: /^\/manual$/, page: manual, nav: 'manual' },
+  { re: /^\/settings$/, page: settings, nav: 'settings' },
 ];
 
 let cleanup = null;
@@ -89,6 +94,7 @@ function renderHeader() {
   for (const b of document.querySelectorAll('[data-alarm-count]')) {
     b.textContent = store.openAlarms;
     b.hidden = !store.openAlarms;
+    b.classList.toggle('badge-alarm', !!store.alarmStats.unackedCrit);
   }
 
   // Gateway down is a farm-wide emergency: every pond's data is stale.
@@ -96,6 +102,8 @@ function renderHeader() {
     showBanner('warn', 'ไม่มีอินเทอร์เน็ต — แสดงข้อมูลล่าสุดที่บันทึกไว้');
   } else if (store.farm && store.farm.gatewayOnline === false) {
     showBanner('crit', `Gateway ฟาร์มขาดการเชื่อมต่อ (${timeAgo(store.farm.gatewaySeenAt)}) — ข้อมูลไม่อัปเดต`);
+  } else if (user && store.farm && !store.alarmStats.alerterOk) {
+    showBanner('crit', 'ระบบแจ้งเตือนหยุดทำงาน — จะไม่มีการแจ้งเตือนใหม่ ติดต่อผู้ดูแลระบบ');
   } else {
     banner.hidden = true;
   }
@@ -108,7 +116,8 @@ function showBanner(level, text) {
 }
 
 subscribe((type) => {
-  if (type === 'conn' || type === 'farm' || type === 'reset') renderHeader();
+  if (type === 'conn' || type === 'farm' || type === 'reset' || type === 'alarms') renderHeader();
+  if (type === 'alarms' || type === 'reset') updateAlarmSound(user ? store.alarmStats.unackedCrit : 0);
 });
 window.addEventListener('online', renderHeader);
 window.addEventListener('offline', renderHeader);
@@ -163,8 +172,10 @@ document.getElementById('logout').addEventListener('click', async () => {
   ) {
     return;
   }
+  await unlinkPush(); // this phone should stop getting the previous user's alarms
   await api.logout().catch(() => {});
   stopFarm();
+  stopAlarmSound();
   setUser(null);
   if ('caches' in window) {
     caches
@@ -180,6 +191,7 @@ window.addEventListener('auth-required', () => {
   if (!user) return;
   setUser(null);
   stopFarm();
+  stopAlarmSound();
   route();
 });
 
@@ -204,6 +216,7 @@ async function start() {
     } catch (err) {
       console.warn('farm load failed', err);
     }
+    relinkPush();
   }
   renderHeader();
   currentPath = null;
@@ -220,6 +233,13 @@ history.scrollRestoration = 'manual';
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch((err) => console.warn('SW registration failed', err));
+  // Notification tapped while the app was already open: go to the alarm's pond / unit.
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data?.type === 'navigate' && typeof e.data.url === 'string') {
+      const hash = new URL(e.data.url, location.origin).hash;
+      if (hash) location.hash = hash;
+    }
+  });
 }
 
 start();

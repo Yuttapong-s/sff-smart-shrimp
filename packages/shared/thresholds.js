@@ -149,3 +149,32 @@ export const PHYSICAL_RANGE = {
   orp: [-2000, 2000],
   temp: [-5, 60],
 };
+
+export const ALARM_METRICS = ['do', 'temp', 'ph', 'orp'];
+
+/**
+ * Validate one alarm rule {critLow, warnLow, warnHigh, critHigh, holdSeconds} (null = not used).
+ * Limits must lie in PHYSICAL_RANGE and increase: critLow < warnLow < warnHigh < critHigh.
+ * @returns {string[]} Thai error messages
+ */
+export function validateRule(metric, r) {
+  const errors = [];
+  const label = METRIC_INFO[metric]?.label;
+  if (!ALARM_METRICS.includes(metric)) return [`ไม่รู้จักค่า ${metric}`];
+  const [lo, hi] = PHYSICAL_RANGE[metric];
+  const seq = [];
+  for (const k of ['critLow', 'warnLow', 'warnHigh', 'critHigh']) {
+    const v = r?.[k];
+    if (v == null) continue;
+    if (!isNum(v)) errors.push(`${label}: ค่าเกณฑ์ต้องเป็นตัวเลข`);
+    else if (v < lo || v > hi) errors.push(`${label}: ค่าเกณฑ์ต้องอยู่ระหว่าง ${lo}–${hi}`);
+    else seq.push(v);
+  }
+  if (!errors.length && seq.some((v, i) => i > 0 && v <= seq[i - 1])) {
+    errors.push(`${label}: ต้องเรียง วิกฤตต่ำ < เตือนต่ำ < เตือนสูง < วิกฤตสูง`);
+  }
+  if (!seq.length) errors.push(`${label}: ต้องมีเกณฑ์อย่างน้อย 1 ค่า`);
+  const h = r?.holdSeconds;
+  if (!Number.isInteger(h) || h < 0 || h > 3600) errors.push(`${label}: เวลายืนยันต้องเป็น 0–3600 วินาที`);
+  return errors;
+}

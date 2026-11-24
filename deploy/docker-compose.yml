@@ -67,6 +67,10 @@ services:
       SEED_UNITS: ${SEED_UNITS:-12}
       SEED_PONDS_MIN: ${SEED_PONDS_MIN:-4}
       SEED_PONDS_MAX: ${SEED_PONDS_MAX:-6}
+      # Web Push: leave empty to auto-generate (stored in the DB); set to keep keys across DB rebuilds.
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:admin@localhost}
     depends_on:
       db:
         condition: service_healthy
@@ -89,6 +93,21 @@ services:
         condition: service_healthy # api runs migrations
       emqx:
         condition: service_healthy
+
+  alerter:
+    # Alarm rules + hold time, Web Push, re-notify / escalation. Must run in production.
+    image: ${IMAGE:-sff-smart-shrimp:local}
+    restart: unless-stopped
+    build: ..
+    command: ["node", "apps/api/src/alerter.js"]
+    environment:
+      <<: *app-env
+      ALERT_TICK_SEC: ${ALERT_TICK_SEC:-10}
+      ALERT_CRIT_REPEAT_MIN: ${ALERT_CRIT_REPEAT_MIN:-5}
+      ALERT_WARN_ESCALATE_MIN: ${ALERT_WARN_ESCALATE_MIN:-30}
+    depends_on:
+      api:
+        condition: service_healthy # api runs migrations
 
   simulator:
     image: ${IMAGE:-sff-smart-shrimp:local}

@@ -1,8 +1,9 @@
 // Service worker: app shell works offline; API GETs fall back to the last cached response
 // so the overview still shows the latest known state when signal drops at the ponds.
 
-// Bump VERSION when the shell or the API response shape changes (v2: units + RAS, v3: manual records).
-const VERSION = 'v3';
+// Bump VERSION when the shell or the API response shape changes
+// (v2: units + RAS, v3: manual records, v4: alarms + push).
+const VERSION = 'v4';
 const SHELL = `sff-shell-${VERSION}`;
 const API = `sff-api-${VERSION}`;
 
@@ -17,6 +18,9 @@ const SHELL_FILES = [
   '/js/format.js',
   '/js/outbox.js',
   '/js/records-view.js',
+  '/js/push.js',
+  '/js/alarm-sound.js',
+  '/js/pages/settings.js',
   '/js/components/ts-chart.js',
   '/js/components/metric-card.js',
   '/js/pages/overview.js',
@@ -78,4 +82,65 @@ self.addEventListener('fetch', (e) => {
     return;
   }
   e.respondWith(networkFirst(req, SHELL));
+});
+
+// ---------- Web Push ----------
+// Payload from the alerter: {title, body, tag, url, alarmId, severity: crit|warn|info, renotify, time}
+
+self.addEventListener('push', (e) => {
+  let d;
+  try {
+    d = e.data.json();
+  } catch {
+    d = { title: 'SFF Smart Shrimp', body: e.data?.text() ?? '' };
+  }
+  const crit = d.severity === 'crit';
+  const actionable = d.alarmId && d.severity !== 'info';
+  e.waitUntil(
+    self.registration.showNotification(d.title ?? 'SFF Smart Shrimp', {
+      body: d.body,
+      tag: d.tag,
+      renotify: !!(d.renotify && d.tag),
+      requireInteraction: crit, // stays on screen until handled
+      silent: d.severity === 'info',
+      icon: '/icons/icon-192.png',
+      badge: '/icons/icon-192.png',
+      vibrate: crit ? [500, 200, 500, 200, 500] : [200],
+      timestamp: Date.parse(d.time) || Date.now(),
+      data: { url: d.url ?? '/#/alarms', alarmId: d.alarmId ?? null },
+      actions: actionable ? [{ action: 'ack', title: 'รับทราบ' }, { action: 'open', title: 'เปิดดู' }] : [],
+    }),
+  );
+});
+
+async function openApp(url) {
+  const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  for (const c of all) {
+    if (new URL(c.url).origin === location.origin) {
+      await c.focus();
+      c.postMessage({ type: 'navigate', url });
+      return;
+    }
+  }
+  await self.clients.openWindow(url);
+}
+
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const { url = '/#/alarms', alarmId } = e.notification.data ?? {};
+  if (e.action === 'ack' && alarmId) {
+    // Acknowledge straight from the notification; if the session expired, open the app instead.
+    e.waitUntil(
+      fetch(`/api/alarms/${alarmId}/ack`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ via: 'notification' }),
+      })
+        .then((r) => (r.ok ? null : openApp(url)))
+        .catch(() => openApp(url)),
+    );
+    return;
+  }
+  e.waitUntil(openApp(url));
 });

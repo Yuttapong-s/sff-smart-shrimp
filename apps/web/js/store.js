@@ -12,6 +12,7 @@ export const store = {
   farm: null,
   thresholds: DEFAULT_THRESHOLDS,
   openAlarms: 0,
+  alarmStats: { open: 0, unacked: 0, crit: 0, unackedCrit: 0, alerterOk: true, alerterAt: null },
   units: new Map(), // id -> unit json (with .ras)
   unitOrder: [], // unit ids in sort order
   ponds: new Map(), // id -> pond json
@@ -68,6 +69,7 @@ export async function loadFarm(farmId) {
   store.unitOrder = o.units.map((u) => u.id);
   store.thresholds = o.thresholds;
   store.openAlarms = o.openAlarms;
+  if (o.alarmStats) store.alarmStats = o.alarmStats;
   store.ponds = new Map(o.ponds.map((p) => [p.id, p]));
   store.order = o.ponds.map((p) => p.id);
   store.loadedAt = Date.now();
@@ -100,9 +102,26 @@ export async function loadFarm(farmId) {
       }
       if (ids.length) emit('units', ids);
     },
-    onFarm: (f) => {
+    onFarm: ({ thresholds, ...f }) => {
       Object.assign(store.farm, f);
+      if (thresholds) {
+        // Alarm limits were edited: re-colour everything with the new thresholds.
+        store.thresholds = thresholds;
+        const ids = [];
+        for (const p of store.ponds.values()) {
+          reevaluate(p);
+          ids.push(p.id);
+        }
+        for (const u of store.units.values()) reevaluateRas(u);
+        emit('ponds', ids);
+        emit('units', [...store.units.keys()]);
+      }
       emit('farm');
+    },
+    onAlarms: (stats) => {
+      store.alarmStats = stats;
+      store.openAlarms = stats.open;
+      emit('alarms', stats);
     },
     // A manual record was saved / deleted somewhere: {type, unitId, pondId}
     onRecords: (r) => emit('records', r),

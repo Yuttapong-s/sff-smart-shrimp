@@ -4,6 +4,7 @@ import { login, logout, requireAuth } from './auth.js';
 import { listPonds, getPond, getReadings, getRasReadings, getThresholds } from './ponds.js';
 import { listUnits } from './units.js';
 import { streamHandler } from './stream.js';
+import { alarms, alarmStats } from './alarms.js';
 import { records, waterTests, waterLatest, labTests, feedings, growthSamples, cycleHistory } from './records.js';
 
 export const api = Router();
@@ -21,6 +22,7 @@ api.use(requireAuth);
 api.get('/me', (req, res) => res.json(req.user));
 
 api.use(records);
+api.use(alarms);
 
 api.get('/farms', async (_req, res) => {
   const { rows } = await pool.query(
@@ -37,11 +39,11 @@ api.get('/farms/:id/overview', async (req, res) => {
   } = await pool.query('SELECT id, code, name, gateway_online, gateway_seen_at FROM farms WHERE id = $1', [farmId]);
   if (!farm) return res.status(404).json({ error: 'farm not found' });
 
-  const [units, ponds, thresholds, { rows: alarmCount }] = await Promise.all([
+  const [units, ponds, thresholds, stats] = await Promise.all([
     listUnits(farmId),
     listPonds(farmId),
     getThresholds(farmId),
-    pool.query('SELECT count(*)::int AS n FROM alarms WHERE farm_id = $1 AND cleared_at IS NULL', [farmId]),
+    alarmStats(farmId),
   ]);
   res.json({
     serverTime: new Date().toISOString(),
@@ -54,7 +56,8 @@ api.get('/farms/:id/overview', async (req, res) => {
     },
     units,
     thresholds,
-    openAlarms: alarmCount[0].n,
+    openAlarms: stats.open,
+    alarmStats: stats,
     ponds,
   });
 });
@@ -74,8 +77,9 @@ api.get('/ponds/:id', async (req, res) => {
       [pondId],
     ),
     pool.query(
-      `SELECT id, metric, severity, message, source, started_at, cleared_at, acked_at
-       FROM alarms WHERE pond_id = $1 ORDER BY started_at DESC LIMIT 20`,
+      `SELECT a.id, a.metric, a.severity, a.message, a.source, a.started_at, a.cleared_at, a.acked_at, usr.display_name AS acked_by
+       FROM alarms a LEFT JOIN users usr ON usr.id = a.acked_by
+       WHERE a.pond_id = $1 ORDER BY a.started_at DESC LIMIT 20`,
       [pondId],
     ),
     pool.query(
